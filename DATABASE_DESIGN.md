@@ -1,6 +1,6 @@
-# NETRA Database Design & Prisma Schema Architecture
+# NETRA Database Design & PostgreSQL RLS Strategy
 
-## 1. Database Engine & Schema Governance
+## 1. PostgreSQL Engine & Schema Governance
 
 NETRA uses **PostgreSQL 16** as its core relational data store and **Prisma ORM** for type-safe query building and schema migration management.
 
@@ -44,41 +44,72 @@ NETRA uses **PostgreSQL 16** as its core relational data store and **Prisma ORM*
                                +---------+
 ```
 
-### 2.2 Real PostgreSQL RLS Technical Pattern with Prisma
-Prisma does not natively append RLS settings to raw SQL queries automatically. NETRA enforces database-level RLS using Prisma's transactional `SET LOCAL` pattern:
+---
 
-**Backend Transaction Wrapper (`withTenantContext`):**
+## 3. Deep Technical RLS Architecture & Prisma Validation
+
+### 3.1 Prisma Interactive Transaction Pattern (`withTenantContext`)
+Prisma does not natively attach session parameters to standard queries. NETRA enforces RLS by wrapping all tenant-scoped database interactions inside Prisma Interactive Transactions using `SET LOCAL`:
+
 ```typescript
 export async function withTenantContext<T>(
   tenantId: string,
   fn: (tx: Prisma.TransactionClient) => Promise<T>
 ): Promise<T> {
-  return await prisma.$transaction(async (tx) => {
-    // 1. Establish session variable for current transaction scope
-    await tx.$executeRawUnsafe(
-      `SET LOCAL app.current_tenant_id = '${tenantId}';`
-    );
+  if (!tenantId || tenantId.trim() === '') {
+    throw new Error('SECURITY_FATAL: MissingTenantContextException - Cannot query database without resolved tenantId');
+  }
 
-    // 2. Execute target Prisma query within protected transaction scope
+  return await prisma.$transaction(async (tx) => {
+    // 1. Establish transaction-scoped GUC (Grand Unified Configuration) variable
+    await tx.$executeRaw`SELECT set_config('app.current_tenant_id', ${tenantId}, true);`;
+
+    // 2. Execute target domain queries safely inside protected transaction scope
     return await fn(tx);
   });
 }
 ```
 
-**PostgreSQL Row-Level Security Policy Definition:**
+### 3.2 Key RLS Technical Attributes
+
+#### A. Transaction Scope (`SET LOCAL`)
+The `true` parameter in `set_config('app.current_tenant_id', val, true)` (equivalent to `SET LOCAL`) binds the variable strictly to the lifetime of the current database transaction. When the transaction commits or rolls back, PostgreSQL automatically clears the variable.
+
+#### B. Connection Pooling & PgBouncer Compatibility
+NETRA supports PgBouncer operating in **transaction pool mode**. Because `SET LOCAL` is bound to transaction boundaries and cleared upon transaction end, connections returned to the pool never retain dirty tenant context state.
+
+#### C. Deterministic Failure Behavior on Missing Context
+Every PostgreSQL table enforcing RLS defines policies using `current_setting('app.current_tenant_id', true)`:
+
 ```sql
--- Enable RLS on findings table
 ALTER TABLE findings ENABLE ROW LEVEL SECURITY;
 
--- Create tenant isolation policy
 CREATE POLICY tenant_isolation_policy ON findings
     FOR ALL
     USING (tenant_id = current_setting('app.current_tenant_id', true));
 ```
+- **Missing Context Handling**: The second argument `true` ensures that if `app.current_tenant_id` is missing or uninitialized, `current_setting` returns `NULL`.
+- **Zero-Data Leak Guarantee**: In SQL, `tenant_id = NULL` evaluates to `FALSE` for all rows. Therefore, if a developer mistakenly executes a query without initializing tenant context, PostgreSQL returns **0 rows** instead of leaking multi-tenant data!
+
+#### D. Database User Roles & Migration Strategy
+- **Migration Role (`netra_migration_runner`)**: Granted `SUPERUSER` or `BYPASSRLS` privileges. Used strictly during deployment pipelines (`npx prisma migrate deploy`) to alter DDL and execute schema migrations.
+- **Application Runtime Role (`netra_app_user`)**: Restricted non-superuser role **WITHOUT** `BYPASSRLS` privileges. Used by the Node.js backend at runtime. RLS policies are strictly enforced on every query.
+
+#### E. Automated Integration Test Strategy for RLS
+The CI/CD test suite contains dedicated RLS enforcement tests:
+```typescript
+describe('PostgreSQL RLS Enforcement Verification', () => {
+  it('should return 0 rows when app_user queries findings without tenant context', async () => {
+    // Connect as netra_app_user directly bypassing application middleware
+    const rawResult = await rawAppUserClient.$queryRaw`SELECT * FROM findings;`;
+    expect(rawResult).toHaveLength(0); // Asserts zero data leaked
+  });
+});
+```
 
 ---
 
-## 3. Expanded Prisma Schema Blueprint (`prisma/schema.prisma`)
+## 4. Prisma Schema Blueprint (`prisma/schema.prisma`)
 
 ```prisma
 datasource db {
