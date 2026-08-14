@@ -4,10 +4,14 @@
 
 **NETRA** (Network & Enterprise Threat Reconnaissance Agent) is a production-grade, multi-tenant security operations toolkit designed for distributed vulnerability assessment, local machine security enforcement, and centralized threat management.
 
-The system is organized into three distinct repositories to maintain strict separation of concerns:
-- **Repository 1: NETRA Backend** (`netra-backend`) — The central security engine, multi-tenant database owner, identity provider, command orchestration broker, agent gateway, and audit vault.
-- **Repository 2: NETRA Discord Control Plane** (`netra-discord`) — An interactive management and alerting interface that operates strictly as an API client to the Backend.
-- **Repository 3: NETRA Agent** (`netra-agent`) — Standalone Python agent package running on user client host machines that executes authorized security modules and reports telemetry back to the Backend.
+### 1.1 Repository Scope & Phase 0 Workspace Context
+- **Current Repository (`Subhadip-Paul2006/NETRA-agent`)**: Acts as the Phase 0 architecture design baseline and repository workspace for the entire NETRA system.
+- **Target Multi-Repository Architecture**:
+  - **Repository 1: NETRA Backend** (`netra-backend`) — Centralized security engine, multi-tenant database owner, identity provider, command orchestration broker, agent gateway, and audit vault.
+  - **Repository 2: NETRA Discord Control Plane** (`netra-discord`) — Interactive management and alerting interface operating strictly as an API client to the Backend.
+  - **Repository 3: NETRA Agent** (`netra-agent`) — Standalone Python agent package running on user client host machines that executes authorized security capabilities and reports telemetry back to the Backend.
+
+The final repository ownership and code layout are governed by Phase 0 architecture documentation before implementation begins.
 
 ---
 
@@ -102,9 +106,9 @@ Discord and Local Agents **NEVER** communicate directly with each other. All con
 - **Alternatives Considered**: Inbound REST server on Agent, Server-Sent Events (SSE).
 - **Why Rejected**: Inbound REST on Agent requires open firewall ports on client PCs (unacceptable security risk). SSE is unidirectional and requires an auxiliary channel for result posting.
 
-### ADR-03: Primary Data Store — PostgreSQL with Prisma ORM
-- **Decision**: Choose **PostgreSQL** with **Prisma ORM**.
-- **Why**: Relational schema guarantees, strong ACID transactions for audit logs, and PostgreSQL Row-Level Security (RLS) support for database-level multi-tenant isolation.
+### ADR-03: Primary Data Store — PostgreSQL with Prisma ORM & RLS
+- **Decision**: Choose **PostgreSQL 16** with **Prisma ORM** using interactive transaction `SET LOCAL` context scoping for PostgreSQL Row-Level Security (RLS).
+- **Why**: Relational schema guarantees, strong ACID transactions for audit logs, and PostgreSQL RLS support for database-level multi-tenant isolation.
 - **Alternatives Considered**: MongoDB, MySQL.
 - **Why Rejected**: MongoDB lacks strict relational integrity and cascading deletes needed for hierarchical tenant isolation (`Tenant` $\rightarrow$ `TenantMembership` $\rightarrow$ `Device` $\rightarrow$ `Task` $\rightarrow$ `Finding`).
 
