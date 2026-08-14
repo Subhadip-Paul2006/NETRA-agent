@@ -1,13 +1,102 @@
-# NETRA System Design
+# NETRA System Design & Concurrency Architecture
 
-## 1. Directional Data & Control Flow
+## 1. Multi-User Concurrency Design Principles
+
+NETRA is built from Day 1 to handle high-concurrency multi-tenant operations cleanly across 10+ simultaneous users, hundreds of enrolled agent devices, and concurrent Discord command triggers.
+
+### 1.1 State Isolation Scopes Table
+
+To guarantee that a failure or state corruption in User A's session never impacts User B, state is strictly scoped and decoupled from process-local global variables:
+
+| Scope | Managed Entities | Storage / Lifecycle | Concurrency & Boundary Enforcement |
+| :--- | :--- | :--- | :--- |
+| **Shared Platform State** | Global DB Schema, Enum Definitions, Audit Vault | PostgreSQL 16 DB | Transaction isolation, Row-Level Security (`app.current_tenant_id`), ACID constraints. |
+| **User-Scoped State** | User JWTs, `TenantMembership`, User Session | DB `user_sessions`, JWT payload | Cryptographically signed JWT claims; verified on every API request. |
+| **Device-Scoped State** | `DeviceCredential`, Active WSS Connection | DB `device_credentials`, In-Memory WSS Connection Registry (`connectionId` mapped to `deviceId` + `tenantId`) | Isolated connection streams; disconnect on device A does not affect device B. |
+| **Request-Scoped State** | `request_id`, `TenantContext`, Route Params | Node.js Fastify AsyncLocalStorage (`RequestStore`) | Immutable per-request object; created at Gateway entry, destroyed on HTTP/WSS response. |
+| **Locking Boundaries** | Task Queue Claims (`QUEUED` $\rightarrow$ `DELIVERED`) | PostgreSQL `FOR UPDATE SKIP LOCKED` | Database-level row locking prevents duplicate task claims under concurrent polling/WSS pushes. |
+| **Idempotency Boundaries** | Task Execution Results Ingestion | DB `task_executions` (`executionId` + `X-Idempotency-Key`) | Idempotent transaction guard; retried result submissions return cached ACK without duplicate writes. |
+| **Queue Boundaries** | Pending Task Queue | PostgreSQL `tasks` table (`status = QUEUED`) | Multi-tenant compound index `(tenantId, status)`; tasks isolated per tenant slice. |
+
+---
+
+## 2. Three-User Simultaneous Execution Sequence Diagram
+
+The following sequence diagram demonstrates **three independent users (User A, User B, User C)** operating concurrently across different tenants and devices without cross-tenant state leakage or queue blocking:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor UserA as User A (Tenant Alpha)
+    actor UserB as User B (Tenant Beta)
+    actor UserC as User C (Tenant Gamma)
+    
+    participant Discord as NETRA Discord (Repo 2)
+    participant Backend as NETRA Backend (Repo 1)
+    participant AgentA as Agent A (User A Laptop)
+    participant AgentB as Agent B (User B Server)
+    participant AgentC as Agent C (User C PC)
+
+    Note over UserA, AgentC: Concurrent Initialization & Task Requests
+    par User A Action
+        UserA->>Discord: `/scan device:laptop-a capability:SCAN_NETWORK`
+        Discord->>Backend: POST /api/v1/control/tasks (Tenant Alpha JWT)
+        Backend->>Backend: Validate AuthZ, Insert Task A1 (Tenant Alpha, QUEUED)
+    and User B Action
+        UserB->>Discord: `/scan device:server-b capability:SCAN_PROCESSES`
+        Discord->>Backend: POST /api/v1/control/tasks (Tenant Beta JWT)
+        Backend->>Backend: Validate AuthZ, Insert Task B1 (Tenant Beta, QUEUED)
+    and User C Action
+        UserC->>Discord: `/scan device:pc-c capability:SCAN_FIREWALL`
+        Discord->>Backend: POST /api/v1/control/tasks (Tenant Gamma JWT)
+        Backend->>Backend: Validate AuthZ, Insert Task C1 (Tenant Gamma, QUEUED)
+    end
+
+    Note over Backend, AgentC: Concurrent Task Dispatch & WSS Streams
+    par Dispatch to Agent A
+        Backend->>AgentA: Push TASK_DISPATCH A1 over WSS Stream (Conn 101)
+        AgentA-->>Backend: ACK TASK A1 (Status -> RUNNING)
+    and Dispatch to Agent B
+        Backend->>AgentB: Push TASK_DISPATCH B1 over WSS Stream (Conn 202)
+        AgentB-->>Backend: ACK TASK B1 (Status -> RUNNING)
+    and Dispatch to Agent C
+        Backend->>AgentC: Push TASK_DISPATCH C1 over WSS Stream (Conn 303)
+        AgentC-->>Backend: ACK TASK C1 (Status -> RUNNING)
+    end
+
+    Note over AgentA, Backend: Local Module Execution & Parallel Result Ingestion
+    par Agent A Execution
+        AgentA->>AgentA: Execute `SCAN_NETWORK` locally
+        AgentA->>Backend: POST /results (HMAC Signed, Tenant Alpha)
+        Backend->>Backend: RLS SET LOCAL 'tenant_alpha' -> Store Finding A1
+        Backend-->>Discord: Push Result Embed A1 (Ephemeral to User A)
+        Discord-->>UserA: Renders Findings Embed A1
+    and Agent B Execution (Simulated Network Retry)
+        AgentB->>AgentB: Execute `SCAN_PROCESSES` locally
+        AgentB->>Backend: POST /results (Idempotency Key B1) [Network Dropped]
+        AgentB->>Backend: Retry POST /results (Idempotency Key B1)
+        Backend->>Backend: Deduplicate Key B1 -> Return Cached ACK
+        Backend-->>Discord: Push Result Embed B1 (Ephemeral to User B)
+        Discord-->>UserB: Renders Findings Embed B1
+    and Agent C Execution
+        AgentC->>AgentC: Execute `SCAN_FIREWALL` locally
+        AgentC->>Backend: POST /results (HMAC Signed, Tenant Gamma)
+        Backend->>Backend: RLS SET LOCAL 'tenant_gamma' -> Store Finding C1
+        Backend-->>Discord: Push Result Embed C1 (Ephemeral to User C)
+        Discord-->>UserC: Renders Findings Embed C1
+    end
+```
+
+---
+
+## 3. Directional Data & Control Flow
 
 NETRA enforces strict directional isolation. The Discord Control Plane and NETRA Agents NEVER interact directly:
 
 ```
 [ User in Discord ]
         │
-        │ 1. /scan target:laptop-01 module:SCAN_NETWORK
+        │ 1. /scan target:laptop-01 capability:SCAN_NETWORK
         ▼
 [ NETRA Discord (Repo 2) ]
         │
@@ -26,7 +115,7 @@ NETRA enforces strict directional isolation. The Discord Control Plane and NETRA
 [ NETRA Backend (Repo 1) ]
         │
         │ 7. Validate Signature, Idempotency, Store Findings & Audit
-        │ 8. Emit SSE Event / Event Notification
+        │ 8. Emit Event Notification
         ▼
 [ NETRA Discord (Repo 2) ]
         │
@@ -37,9 +126,7 @@ NETRA enforces strict directional isolation. The Discord Control Plane and NETRA
 
 ---
 
-## 2. Explicit Task Lifecycle State Machine
-
-To guarantee deterministic orchestration when 100+ concurrent scans occur simultaneously, every task adheres to a strict state machine with formal timeout and failure transitions.
+## 4. Explicit Task Lifecycle State Machine
 
 ```mermaid
 stateDiagram-v2
@@ -63,7 +150,7 @@ stateDiagram-v2
     CANCELLED --> [*]
 ```
 
-### 2.1 State Definitions & Transition Rules
+### 4.1 State Definitions & Transition Rules
 
 | State | Scope | Description & Trigger Conditions |
 | :--- | :--- | :--- |
@@ -80,9 +167,7 @@ stateDiagram-v2
 
 ---
 
-## 3. Device Enrollment Architecture & Sequence
-
-Device enrollment securely pairs a user's physical machine with their NETRA Tenant without embedding long-lived credentials in installers.
+## 5. Device Enrollment Architecture & Sequence
 
 ```mermaid
 sequenceDiagram
@@ -101,23 +186,7 @@ sequenceDiagram
     Agent->>Backend: POST /api/v1/agent/enroll (Code + Host Metadata + Public Key)
     Backend->>Backend: Validate Code, Create Device Record, Generate `device_id` & `device_secret`
     Backend-->>Agent: Return `device_id`, `device_secret`, Tenant Context
-    Agent->>Agent: Save credentials encrypted in OS Keyring / `~/.config/netra/credentials.json`
+    Agent->>Agent: Save credentials encrypted in OS Keyring / `credentials.json`
     Agent-->>Backend: Establish Primary WebSocket Connection (WSS)
     Backend->>Backend: Mark Device Status = `ACTIVE`
 ```
-
----
-
-## 4. Idempotency & Retry Safety Model
-
-To prevent duplicate findings or duplicate task executions caused by network retries, every task execution carries a tri-part correlation identity:
-
-- **`task_id`**: Globally unique ID for the requested task.
-- **`execution_id`**: Unique ID generated per execution attempt (changes on task retry).
-- **`request_id`**: HTTP/WSS request tracing ID (generated per network payload).
-
-### 4.1 Deduplication Logic on Result Ingestion
-1. Agent submits task results containing `task_id`, `execution_id`, and `request_id` along with `X-Idempotency-Key` header (`task_id:execution_id`).
-2. Backend checks PostgreSQL `task_executions` table:
-   - If `execution_id` already exists with status `COMPLETED`, Backend returns `200 OK` with cached ack response without re-inserting findings.
-   - If `execution_id` is new, Backend executes a database transaction: updates task status, inserts findings using fingerprint deduplication (`tenantId_fingerprint`), and creates audit event.
