@@ -162,7 +162,7 @@ To fulfill the architecture requirement where slash commands receive immediate e
 ```
 +----------------+      Result Event      +------------------+     Discord DM API     +--------------+
 | NETRA Backend  | ---------------------> | Discord Service  | ---------------------> | User Discord |
-| (netra-backend)|  (Webhook / Event)     | (netra-discord)  |   (Direct Message)     | (DM Inbox)   |
+| (backend/)      |  (Webhook / Event)     | (discord/)       |   (Direct Message)     | (DM Inbox)   |
 +----------------+                        +------------------+                        +--------------+
 ```
 
