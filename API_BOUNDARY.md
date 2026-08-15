@@ -11,6 +11,40 @@
   - `X-Idempotency-Key`: `task_id:execution_id` for retry safety
   - `X-NETRA-Signature`: Ed25519 cryptographic signature (hex or base64 encoded)
 
+### 1.1 Standardized Error Envelope & Error Code Registry
+
+All API errors return `Content-Type: application/json` with a consistent error structure:
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Invalid request parameters provided",
+    "details": { "field": "ports", "issue": "Value out of range 1-65535" },
+    "request_id": "req_8f7e6d5c4b3a2a1",
+    "timestamp": "2026-08-15T10:00:00.000Z"
+  }
+}
+```
+
+| Error Code | HTTP Status | Description & Operational Condition |
+| :--- | :--- | :--- |
+| `VALIDATION_ERROR` | `400 Bad Request` | Body or query parameters failed Zod/Pydantic schema validation. |
+| `UNAUTHORIZED` | `401 Unauthorized` | Invalid JWT token, expired session, or invalid Ed25519 signature. |
+| `FORBIDDEN` | `403 Forbidden` | User/Agent lacks permission role or cross-tenant access attempted. |
+| `NOT_FOUND` | `404 Not Found` | Target device, task, finding, or user resource does not exist. |
+| `CONFLICT` | `409 Conflict` | Unique constraint violation or single-use enrollment code already used. |
+| `RATE_LIMITED` | `429 Too Many Requests` | Request volume exceeded tenant or IP rate limit threshold. |
+| `IDEMPOTENCY_CONFLICT` | `409 Conflict` | Conflicting execution parameters submitted for an existing `X-Idempotency-Key`. |
+| `DEVICE_REVOKED` | `401 Unauthorized` | Target device key has been revoked by tenant admin. |
+| `TASK_EXPIRED` | `410 Gone` | Task requested for cancellation or results submission past TTL expiration. |
+| `INTERNAL_ERROR` | `500 Internal Error` | Unexpected backend runtime failure; request ID logged for auditing. |
+
+### 1.2 API Versioning & Backwards Compatibility
+- **Versioning Strategy**: Explicit URL prefix `/api/v1/`. Breaking changes require incrementing to `/api/v2/`.
+- **Deprecation Policy**: Non-breaking field additions permitted within `v1`. Deprecated endpoints maintain 90-day sunset period before removal.
+
 ---
 
 ## 2. Agent Connection Protocols
@@ -67,9 +101,7 @@
   {
     "target_device_id": "dev_9a8b7c6d5e4f",
     "capability": "SCAN_NETWORK",
-    "parameters": {
-      "ports": "1-1024"
-    }
+    "parameters": { "ports": "1-1024" }
   }
   ```
 - **Response `201 Created`**: `{"success": true, "data": {"task_id": "task_11223344", "status": "QUEUED"}}`
@@ -95,4 +127,30 @@
   }
   ```
 - **Response `200 OK`**: `{"success": true, "data": {"acknowledged": true}}`
+
+### 3.5 `POST /api/v1/control/tasks/:id/cancel` (Cancel Pending Task)
+- **Auth**: Tenant User JWT (Role: `ADMIN` or `OPERATOR`).
+- **Response `200 OK`**: `{"success": true, "data": {"task_id": "task_11223344", "status": "CANCELLED"}}`
+
+### 3.6 `GET /api/v1/devices` (List Enrolled Devices)
+- **Auth**: Tenant User JWT.
+- **Response `200 OK`**: `{"success": true, "data": [{"id": "dev_9a...", "hostname": "workstation-01", "os": "windows", "is_paired": true}]}`
+
+### 3.7 `DELETE /api/v1/devices/:id` (Revoke Device)
+- **Auth**: Tenant User JWT (Role: `ADMIN`).
+- **Response `200 OK`**: `{"success": true, "data": {"revoked": true, "device_id": "dev_9a..."}}`
+
+### 3.8 `GET /api/v1/findings` (List Security Findings)
+- **Auth**: Tenant User JWT.
+- **Response `200 OK`**: `{"success": true, "data": [{"id": "fin_01...", "title": "Open Port", "severity": "HIGH", "fingerprint": "a8f7..."}]}`
+
+### 3.9 `POST /api/v1/control/discord/bind` (Link Discord Identity)
+- **Auth**: Tenant User JWT.
+- **Request Body**: `{"discord_user_id": "1234567890", "discord_guild_id": "9876543210"}`
+- **Response `200 OK`**: `{"success": true, "data": {"bound": true, "discord_user_id": "1234567890"}}`
+
+### 3.10 `GET /api/v1/health` & `GET /api/v1/readiness`
+- **Auth**: None (Public healthcheck probes).
+- **Response `200 OK`**: `{"status": "UP", "database": "CONNECTED", "redis": "CONNECTED", "timestamp": "2026-08-15T10:00:00.000Z"}`
+
 
