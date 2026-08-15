@@ -1,5 +1,7 @@
 """Ed25519 Cryptographic Utilities using Python's cryptography library."""
 
+import hashlib
+
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
@@ -24,6 +26,33 @@ def generate_ed25519_keypair() -> tuple[bytes, bytes]:
         format=serialization.PublicFormat.Raw,
     )
     return private_bytes, public_bytes
+
+
+def construct_canonical_payload(
+    method: str,
+    path: str,
+    timestamp: str,
+    nonce: str,
+    request_id: str,
+    body: bytes | str = b"",
+) -> bytes:
+    """Construct the canonical payload string for Ed25519 signature verification according to SECURITY_MODEL.md.
+
+    canonical_payload = HTTP_METHOD + "\n" +
+                        REQUEST_PATH + "\n" +
+                        TIMESTAMP + "\n" +
+                        NONCE + "\n" +
+                        REQUEST_ID + "\n" +
+                        SHA256(REQUEST_BODY)
+    """
+    if isinstance(body, str):
+        body_bytes = body.encode("utf-8")
+    else:
+        body_bytes = body
+
+    body_hash = hashlib.sha256(body_bytes).hexdigest()
+    canonical_str = f"{method.upper()}\n{path}\n{timestamp}\n{nonce}\n{request_id}\n{body_hash}"
+    return canonical_str.encode("utf-8")
 
 
 def sign_payload(private_key_bytes: bytes, payload: bytes) -> bytes:
