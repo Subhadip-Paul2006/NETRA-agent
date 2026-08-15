@@ -158,22 +158,111 @@ stateDiagram-v2
 
 ### 4.1 State Definitions & Transition Rules
 
-| State | Scope | Description & Trigger Conditions |
-| :--- | :--- | :--- |
-| `CREATED` | Backend | Task payload validated against schema; permissions verified against requesting tenant. |
-| `QUEUED` | Backend DB | Transactionally persisted in PostgreSQL task queue; ready for agent dispatch. |
-| `DELIVERED` | Transport | Pushed to active Agent WSS stream or returned in agent poll response. Lease clock starts. |
-| `ACKNOWLEDGED`| Transport | Agent sends cryptographic ACK receipt (`X-Execution-ID`). Cancels delivery timeout timer. |
-| `RUNNING` | Agent Host | Agent launched pre-compiled scanner module in isolated worker thread/subprocess. |
-| `COMPLETED` | Backend DB | Terminal state. Results verified via Ed25519 public key, deduplicated, committed to tenant findings vault, and emitted for async Discord DM delivery. |
-| `EXPIRED` | Backend DB | Terminal state. Task remained `QUEUED` past maximum TTL (default: 24 hours). |
-| `TIMEOUT` | Backend DB | Terminal state. Agent stopped sending heartbeats or failed to report completion within lease window. |
-| `FAILED` | Backend DB | Terminal state. Local scanner returned non-zero exit code or payload validation failed. |
-| `CANCELLED` | Backend DB | Terminal state. Task aborted manually by authorized tenant administrator. |
+| State | Scope | Trigger / Transitioning Entity | Valid Previous States | Next Valid States | Description & Behavioral Rules |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `CREATED` | Backend | Discord / REST Control Plane | None (Initial) | `QUEUED` | Payload schema validated via Zod; requesting user identity and tenant scope verified. |
+| `QUEUED` | Backend DB | Backend Task Engine | `CREATED` | `DELIVERED`, `EXPIRED` | Persisted in PostgreSQL task queue inside `withTenantContext`. TTL timer starts (24h). |
+| `DELIVERED` | Transport | WSS Gateway / REST Poll | `QUEUED` | `ACKNOWLEDGED`, `TIMEOUT` | Dispatched to active agent WSS connection or poll response. 30-second ACK lease timer starts. |
+| `ACKNOWLEDGED`| Transport | Agent CLI (Ed25519) | `DELIVERED` | `RUNNING`, `TIMEOUT` | Agent verifies dispatch payload, signs ACK receipt with local private key, and cancels ACK lease timer. |
+| `RUNNING` | Agent Host | Agent Worker Engine | `ACKNOWLEDGED` | `COMPLETED`, `FAILED`, `CANCELLED`, `TIMEOUT` | Scanner module initiated in worker thread. 120s heartbeat lease timer active. |
+| `COMPLETED` | Backend DB | Agent Results Ingest | `RUNNING` | Terminal | Results signed with Ed25519, verified against DB public key, deduplicated, and stored. Async DM event emitted. |
+| `EXPIRED` | Backend DB | Expiration Worker | `QUEUED` | Terminal | Task remained `QUEUED` past maximum TTL (24 hours) without agent claiming. |
+| `TIMEOUT` | Backend DB | Lease Sweeper Worker | `DELIVERED`, `RUNNING` | Terminal | Agent failed to ACK within 30s or stopped emitting heartbeats (>120s) during execution. |
+| `FAILED` | Backend DB | Agent / Backend Ingest | `RUNNING` | Terminal | Scanner module experienced non-zero exit code or payload validation failure. |
+| `CANCELLED` | Backend DB | Tenant Admin | `QUEUED`, `DELIVERED`, `RUNNING` | Terminal | Abort command issued by authorized tenant admin via Discord (`/scan cancel`) or REST API. |
+
+### 4.2 Correlation Identifiers & Idempotency Rules
+- **`task_id`**: Identifies the overall user-requested security audit operation across its entire lifecycle.
+- **`execution_id`**: Identifies a specific execution attempt by a target device. A retried task execution generates a new `execution_id`.
+- **`request_id`**: Identifies individual HTTP/WSS network payload transactions for gateway tracing.
+- **`X-Idempotency-Key`**: Formatted as `task_id:execution_id`. The backend checks `TaskExecution` uniqueness `@@unique([taskId, executionId])`. Duplicate result submissions return the cached HTTP 200 ACK without duplicate finding entries or audit logs.
 
 ---
 
-## 5. Device Enrollment Architecture & Sequence
+## 5. Controlled Task Capability Model Specifications
+
+To completely eliminate Remote Code Execution (RCE) and unauthorized data exfiltration risks, NETRA strictly prohibits arbitrary shell string execution (`exec`/`eval` prohibited) and arbitrary file system browsing. Every capability is pre-compiled into the `netra-agent` package and governed by strict schemas:
+
+### 5.1 Capability 1: `SCAN_NETWORK`
+- **Capability ID**: `SCAN_NETWORK`
+- **Purpose**: Audits local network interfaces, active IPv4/IPv6 addresses, and listening TCP/UDP ports.
+- **Input Parameters**: `{"ports": "1-1024", "include_loopback": false}` (Validated via Pydantic).
+- **Output Schema**: `{"interfaces": [...], "open_ports": [{"port": 80, "protocol": "tcp", "service": "http"}]}`.
+- **Privilege Requirement**: Standard User (No elevated privileges required).
+- **Resource Caps**: Max 30 seconds execution time, CPU cap 25%, RAM cap 100MB.
+- **Security Restrictions**: Scans only local machine sockets (`localhost` / local interfaces); no external network port scanning or packet injection.
+- **Audit Event**: `CAPABILITY_EXEC_SCAN_NETWORK`
+- **Allowed Caller Roles**: `OPERATOR`, `ADMIN`
+
+### 5.2 Capability 2: `SCAN_PROCESSES`
+- **Capability ID**: `SCAN_PROCESSES`
+- **Purpose**: Inspects running process tree, process ownership, command line parameters, and executable SHA-256 hashes.
+- **Input Parameters**: `{"min_cpu_percent": 0.0, "verify_signatures": true}`.
+- **Output Schema**: `{"processes": [{"pid": 1234, "name": "svc.exe", "user": "SYSTEM", "sha256": "e3b0c4..."}]}`.
+- **Privilege Requirement**: Standard User (Elevated admin required for full system process hashes on Windows).
+- **Resource Caps**: Max 30 seconds execution time, CPU cap 30%, RAM cap 150MB.
+- **Security Restrictions**: Inspects process metadata only; memory reading (`ptrace`/`OpenProcess`) strictly forbidden.
+- **Audit Event**: `CAPABILITY_EXEC_SCAN_PROCESSES`
+- **Allowed Caller Roles**: `OPERATOR`, `ADMIN`
+
+### 5.3 Capability 3: `SCAN_CONNECTIONS`
+- **Capability ID**: `SCAN_CONNECTIONS`
+- **Purpose**: Inspects active established TCP/UDP network connections and remote endpoints.
+- **Input Parameters**: `{"state": "ESTABLISHED", "resolve_dns": false}`.
+- **Output Schema**: `{"connections": [{"local_addr": "192.168.1.5:49152", "remote_addr": "198.51.100.1:443", "pid": 1234}]}`.
+- **Privilege Requirement**: Standard User.
+- **Resource Caps**: Max 20 seconds execution time, CPU cap 20%, RAM cap 100MB.
+- **Security Restrictions**: Reads OS socket tables only; packet capturing (`libpcap`/`WinPcap`) forbidden.
+- **Audit Event**: `CAPABILITY_EXEC_SCAN_CONNECTIONS`
+- **Allowed Caller Roles**: `OPERATOR`, `ADMIN`
+
+### 5.4 Capability 4: `SCAN_FIREWALL`
+- **Capability ID**: `SCAN_FIREWALL`
+- **Purpose**: Audits local OS firewall state (Windows Defender Firewall / `ufw` / `iptables`) and active inbound policies.
+- **Input Parameters**: `{"profile": "all"}`.
+- **Output Schema**: `{"firewall_enabled": true, "profiles": [{"name": "Public", "inbound_policy": "BLOCK"}]}`.
+- **Privilege Requirement**: Standard User (Admin required to list full `netsh` / `iptables` rule dump).
+- **Resource Caps**: Max 15 seconds execution time, CPU cap 15%, RAM cap 80MB.
+- **Security Restrictions**: Read-only configuration query; firewall rule modification strictly forbidden.
+- **Audit Event**: `CAPABILITY_EXEC_SCAN_FIREWALL`
+- **Allowed Caller Roles**: `OPERATOR`, `ADMIN`
+
+### 5.5 Capability 5: `SCAN_USERS`
+- **Capability ID**: `SCAN_USERS`
+- **Purpose**: Audits local OS user accounts, privileged group memberships (Administrators, `sudo`, `wheel`), and stale accounts.
+- **Input Parameters**: `{"check_disabled": true}`.
+- **Output Schema**: `{"users": [{"username": "admin", "is_active": true, "groups": ["Administrators"]}]}`.
+- **Privilege Requirement**: Administrator / Root privilege required for local shadow/SAM security queries.
+- **Resource Caps**: Max 15 seconds execution time, CPU cap 15%, RAM cap 80MB.
+- **Security Restrictions**: User account metadata query only; password hashes or SAM database contents NEVER returned.
+- **Audit Event**: `CAPABILITY_EXEC_SCAN_USERS`
+- **Allowed Caller Roles**: `ADMIN`
+
+### 5.6 Capability 6: `SCAN_STARTUP`
+- **Capability ID**: `SCAN_STARTUP`
+- **Purpose**: Audits autorun entries, startup folder items, Windows Registry Run keys, systemd services, and scheduled tasks.
+- **Input Parameters**: `{"include_services": true}`.
+- **Output Schema**: `{"startup_items": [{"name": "Updater", "path": "C:\\Program Files\\...", "publisher": "Verified"}]}`.
+- **Privilege Requirement**: Standard User.
+- **Resource Caps**: Max 20 seconds execution time, CPU cap 20%, RAM cap 100MB.
+- **Security Restrictions**: Autorun entry metadata inspection only; registry modification or service control forbidden.
+- **Audit Event**: `CAPABILITY_EXEC_SCAN_STARTUP`
+- **Allowed Caller Roles**: `OPERATOR`, `ADMIN`
+
+### 5.7 Capability 7: `SCAN_FILE_INTEGRITY`
+- **Capability ID**: `SCAN_FILE_INTEGRITY`
+- **Purpose**: Validates cryptographic SHA-256 hashes of critical system binaries against pre-defined baseline manifests.
+- **Input Parameters**: `{"target_manifest": "system32_core"}` (Selects approved system file path list).
+- **Output Schema**: `{"files_scanned": 45, "integrity_violations": [{"path": "C:\\Windows\\System32\\driver.sys", "expected_hash": "a1...", "actual_hash": "b2..."}]}`.
+- **Privilege Requirement**: Administrator / Root.
+- **Resource Caps**: Max 45 seconds execution time, CPU cap 35%, RAM cap 200MB.
+- **Security Restrictions**: Pre-defined file path manifests ONLY. Arbitrary file path parameter input strictly prohibited to prevent arbitrary file reading or privacy breaches.
+- **Audit Event**: `CAPABILITY_EXEC_SCAN_FILE_INTEGRITY`
+- **Allowed Caller Roles**: `ADMIN`
+
+---
+
+## 6. Device Enrollment Architecture & Sequence
 
 ```mermaid
 sequenceDiagram
@@ -185,60 +274,68 @@ sequenceDiagram
 
     User->>Discord: Type `/panel enroll`
     Discord->>Backend: POST /api/v1/control/enrollment-codes (Tenant JWT)
-    Backend-->>Discord: Return short-lived code (e.g. `ABCD-1234`, TTL: 15 min)
+    Backend->>Backend: Create `EnrollmentCode` (Single-use, TTL: 15 min, cryptographically random string)
+    Backend-->>Discord: Return short-lived code (e.g. `ABCD-1234`)
     Discord-->>User: Display code ephemerally
-    
+
     User->>Agent: Run `netra enroll ABCD-1234`
-    Agent->>Agent: Generate Ed25519 Keypair locally<br>Save Private Key in OS Protected Storage
-    Agent->>Backend: POST /api/v1/agent/enroll (Code + Metadata + Ed25519 Public Key)
-    Backend->>Backend: Validate Code, Create Device Record, Register `publicKey` in DB
+    Agent->>Agent: Generate Ed25519 Keypair locally<br>Save Private Key in OS Protected Storage (Windows Credential Manager / Secret Service API / Keychain)
+    Agent->>Backend: POST /api/v1/agent/enroll (Code + Host Metadata + Ed25519 Public Key)
+    Backend->>Backend: Validate Code (Check TTL & `isRevoked`), Create `Device` record, Register `publicKey` in `DeviceCredential`, Mark `EnrollmentCode` as used (`usedAt`, `usedByDeviceId`)
     Backend-->>Agent: Return `device_id`, Tenant Slug & Scoping Details
     Agent-->>Backend: Establish Primary WebSocket Connection (WSS) signed with Ed25519
     Backend->>Backend: Mark Device Status = `ACTIVE`
 ```
 
+### 6.1 Enrollment Code Security Rules
+- **Single-Use**: Once validated, `usedAt` and `usedByDeviceId` are set. Subsequent enrollment attempts with the same code fail with `409 Conflict`.
+- **Short-Lived**: Automatically expires 15 minutes after generation (`expiresAt`). Expired codes fail with `410 Gone`.
+- **Non-Guessable**: Generated using CSPRNG (`crypto.randomBytes`) with high entropy (128-bit).
+- **Revocable**: Tenant Admin can revoke active enrollment codes immediately via `/panel revoke-code`.
+
 ---
 
-## 6. Multi-Tenant Concurrency Matrix & Fault Recovery Architecture
+## 7. Multi-Tenant Concurrency Matrix & Fault Recovery Architecture
 
 NETRA explicitly handles 10 real-world concurrency scenarios and system restart edge cases to ensure data isolation, idempotency, and zero state corruption:
 
-### 6.1 Scenario 1: 3 Users / Same Tenant
+### 7.1 Scenario 1: 3 Users / Same Tenant
 - **Behavior**: User A, User B, User C belong to Tenant Alpha and trigger concurrent scans.
 - **Handling**: Tasks are inserted under `tenantId = tenant_alpha`. Database RLS scopes queries to `tenant_alpha`. PostgreSQL row locks (`FOR UPDATE SKIP LOCKED`) prevent workers from double-claiming tasks. All 3 users see results for Tenant Alpha devices, delivered to each requesting user via personal Discord DM.
 
-### 6.2 Scenario 2: 3 Users / Different Tenants
+### 7.2 Scenario 2: 3 Users / Different Tenants
 - **Behavior**: User A (Tenant Alpha), User B (Tenant Beta), User C (Tenant Gamma) dispatch tasks simultaneously.
 - **Handling**: Strict tenant boundary isolation. Fastify `AsyncLocalStorage` sets `app.current_tenant_id` per request transaction. PostgreSQL RLS prevents cross-tenant data visibility. Zero shared memory or global state leakage between tenants.
 
-### 6.3 Scenario 3: Multiple Devices / Same User
+### 7.3 Scenario 3: Multiple Devices / Same User
 - **Behavior**: User A triggers `/scan` across `device-01`, `device-02`, and `device-03` at the same time.
 - **Handling**: Backend creates 3 distinct `Task` records (`task_01`, `task_02`, `task_03`). Each task is dispatched to the corresponding device's WSS stream independently. Results are processed in parallel and delivered as separate DMs to User A.
 
-### 6.4 Scenario 4: Simultaneous Commands Processing
+### 7.4 Scenario 4: Simultaneous Commands Processing
 - **Behavior**: Rapid burst of 50 incoming Discord slash commands within 1 second.
 - **Handling**: Non-blocking Node.js async event loop handles REST API requests. Fastify processes incoming HTTP tasks asynchronously, validating Zod schemas and inserting `QUEUED` task rows in bulk database transactions.
 
-### 6.5 Scenario 5: Simultaneous Task Results Ingestion
+### 7.5 Scenario 5: Simultaneous Task Results Ingestion
 - **Behavior**: 20 agents post scan results (`POST /api/v1/agent/tasks/:id/results`) simultaneously.
 - **Handling**: Each result ingestion request runs inside a dedicated database transaction with `SET LOCAL app.current_tenant_id`. Ed25519 signatures are verified in parallel using Node's `crypto.verify`. Findings are bulk-inserted with `ON CONFLICT DO NOTHING` for deduplication.
 
-### 6.6 Scenario 6: Duplicate Deliveries & Network Retries
+### 7.6 Scenario 6: Duplicate Deliveries & Network Retries
 - **Behavior**: Agent posts scan results, but network drops before receiving HTTP 200 ACK. Agent retries posting identical result payload.
 - **Handling**: Ingestion endpoint validates `X-Idempotency-Key: task_id:execution_id`. The compound unique constraint `@@unique([taskId, executionId])` in `TaskExecution` detects duplicate submissions, skips redundant finding writes, and returns the cached HTTP 200 ACK.
 
-### 6.7 Scenario 7: WSS Disconnections & Automatic Reconnection
+### 7.7 Scenario 7: WSS Disconnections & Automatic Reconnection
 - **Behavior**: Flaky network disconnects Agent WSS stream during idle state.
 - **Handling**: Agent detects WSS closure, initiates exponential backoff reconnect (1s, 2s, 4s, 8s... max 60s) with jitter. During WSS outage, Agent polls fallback REST endpoint `GET /api/v1/agent/tasks` every 15s. Upon WSS reconnect, Agent signs WSS handshake with Ed25519 private key and resumes real-time stream.
 
-### 6.8 Scenario 8: Backend Service Restart & Task Recovery
+### 7.8 Scenario 8: Backend Service Restart & Task Recovery
 - **Behavior**: `netra-backend` container restarts while tasks are in `QUEUED` or `DELIVERED` state.
 - **Handling**: State machine recovery job executes on Backend startup. Tasks stuck in `DELIVERED` without an ACK past lease expiration (30s) are reset to `QUEUED`. Connected agents automatically reconnect WSS streams and re-fetch pending tasks.
 
-### 6.9 Scenario 9: Discord Bot Service Restart
+### 7.9 Scenario 9: Discord Bot Service Restart
 - **Behavior**: `netra-discord` container restarts while user commands are in flight.
 - **Handling**: Discord gateway automatically resumes session using session ID and sequence number. The bot re-registers slash commands if needed. Ongoing task execution in Backend is completely unaffected because task state is persisted in PostgreSQL, not in Discord bot memory. When results complete, Backend emits event and Discord bot sends DMs upon reconnect.
 
-### 6.10 Scenario 10: Agent Host Restart & Local Worker Recovery
+### 7.10 Scenario 10: Agent Host Restart & Local Worker Recovery
 - **Behavior**: User PC reboots or agent process crashes while task is in `RUNNING` state.
 - **Handling**: On agent startup, `netra-agent` daemon checks its encrypted local SQLite queue buffer. Unfinished local scanner executions are marked `FAILED` or retried depending on task parameters. If execution timed out on Backend (>120s missing heartbeat), Backend marks task `TIMEOUT`. Next status check informs the user.
+
