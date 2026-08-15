@@ -53,7 +53,23 @@ class ReadinessCheckManager:
         return all_ready, results
 
 
+async def check_database_readiness() -> bool:
+    """Async database ping check for readiness probe."""
+    try:
+        from sqlalchemy import text
+
+        from netra_backend.database import get_engine
+
+        engine = get_engine()
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        return True
+    except Exception:
+        return False
+
+
 readiness_manager = ReadinessCheckManager()
+readiness_manager.register("database", check_database_readiness)
 
 
 @router.get("/health", summary="Liveness Probe")
