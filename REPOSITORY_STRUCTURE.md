@@ -10,14 +10,14 @@ NETRA cleanly segregates code, dependencies, and execution contexts across three
 │    - Technology: Node.js / TypeScript / Prisma ORM / Fastify                │
 │    - Responsibilities: API Gateway, Identity Provider, Tenant Isolation,    │
 │      PostgreSQL Database Schema, Task State Engine, Agent WSS Gateway,      │
-│      Audit Trail Engine.                                                    │
+│      Ed25519 Signature Verification, Audit Trail Engine.                    │
 └─────────────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │ 2. NETRA Discord Control Plane Repository (netra-discord) [Repo 2]         │
 │    - Technology: Node.js / TypeScript / Discord.js                          │
 │    - Responsibilities: Discord Bot Service, Slash Command Router, Embed     │
-│      Formatter, Discord OAuth2 Identity Verification, Calling Core API.     │
+│      Formatter, Async Result DM Dispatcher, OAuth2 Identity Verification.   │
 │    - STRICT RULE: Zero business logic, scanning code, or direct DB access.  │
 └─────────────────────────────────────────────────────────────────────────────┘
 
@@ -25,8 +25,8 @@ NETRA cleanly segregates code, dependencies, and execution contexts across three
 │ 3. NETRA Agent Repository (netra-agent) [Repo 3 - Standalone Package]       │
 │    - Technology: Python 3.10+ / Hatch / Pytest / httpx / websockets         │
 │    - Responsibilities: Python CLI (`netra`), Device Enrollment Client,      │
-│      Outbound WSS / HTTPS Polling Worker, Local Pre-compiled Scanners,       │
-│      Encrypted SQLite Offline Queue, OS Keyring Credential Vault.           │
+│      Ed25519 Keypair Generator & OS Protected Storage, Outbound WSS Worker, │
+│      Local Pre-compiled Scanners, Encrypted SQLite Offline Queue.            │
 │    - STRICT RULE: Zero awareness or direct coupling to Discord APIs.        │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -50,7 +50,7 @@ netra-backend/
 │   ├── modules/                # Domain modules
 │   │   ├── auth/               # User authentication & JWT management
 │   │   ├── tenant/             # Tenant context & TenantMembership management
-│   │   ├── device/             # Device registration, key vault, WSS session tracker
+│   │   ├── device/             # Device registration, Ed25519 public key vault, WSS tracker
 │   │   ├── task/               # Task lifecycle state machine & queue manager
 │   │   ├── finding/            # Security finding ingest & deduplication engine
 │   │   ├── discord-link/       # Discord OAuth2 identity linking API
@@ -74,7 +74,8 @@ netra-backend/
 ```
 netra-discord/
 ├── .github/workflows/
-│   └── ci.yml                  # Discord bot linting & unit testing
+│   ├── ci.yml                  # Discord bot linting, unit testing & Trivy scan
+│   └── release.yml             # Bot Docker container release
 ├── src/
 │   ├── config/                 # Bot environment loading
 │   ├── client/                 # Core API HTTP client (Axios/Fetch with retry)
@@ -84,6 +85,7 @@ netra-discord/
 │   │   ├── scan/               # /scan start, /scan status
 │   │   └── findings/           # /findings list, /finding view
 │   ├── formatters/             # Rich embed formatters & ANSI color renderers
+│   ├── services/               # Async DM result & alert delivery service
 │   ├── bot.ts                  # Discord.js client initialization
 │   └── index.ts                # Bot entrypoint
 ├── tests/
@@ -101,12 +103,13 @@ netra-discord/
 ```
 netra-agent/
 ├── .github/workflows/
+│   ├── ci.yml                  # Linting, mypy typecheck, pytest & Bandit SAST
 │   └── publish.yml             # PyPI automated package build & release
 ├── netra/
 │   ├── __init__.py
 │   ├── __main__.py             # CLI entrypoint (`netra`)
 │   ├── cli/                    # Argument parser (`netra enroll`, `netra run`)
-│   ├── auth/                   # OS Keyring manager & HMAC SHA-256 signing engine
+│   ├── auth/                   # OS Keyring manager (DPAPI/SecretService/Keychain) & Ed25519 signing engine
 │   ├── connection/             # Outbound WSS client with exponential backoff & HTTPS fallback
 │   ├── worker/                 # Task queue consumer & execution loop
 │   ├── modules/                # Controlled local security audit capabilities
@@ -131,3 +134,4 @@ netra-agent/
 1. **No Shared Code Files**: Repositories maintain strict autonomy. Shared API contracts are defined via OpenAPI specifications.
 2. **Prisma Single-Sourcing**: Database migrations and `schema.prisma` reside **ONLY** in `netra-backend`.
 3. **No Direct Security Engine Code in Control Plane**: Scanning logic resides in `netra-agent`; result normalization resides in `netra-backend`. Neither exists in `netra-discord`.
+
