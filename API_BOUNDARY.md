@@ -151,6 +151,64 @@ All API errors return `Content-Type: application/json` with a consistent error s
 
 ### 3.10 `GET /api/v1/health` & `GET /api/v1/readiness`
 - **Auth**: None (Public healthcheck probes).
-- **Response `200 OK`**: `{"status": "UP", "database": "CONNECTED", "redis": "CONNECTED", "timestamp": "2026-08-15T10:00:00.000Z"}`
+- **Response `200 OK`**: `{"status": "UP", "database": "CONNECTED", "timestamp": "2026-08-15T10:00:00.000Z"}`
+
+---
+
+## 4. Backend-to-Discord Asynchronous Event Bridge Contract
+
+To fulfill the architecture requirement where slash commands receive immediate ephemeral acknowledgments (`ephemeral: true`) and full scan results are delivered asynchronously via Direct Messages (DMs), NETRA establishes an internal event bridge contract:
+
+```
++----------------+      Result Event      +------------------+     Discord DM API     +--------------+
+| NETRA Backend  | ---------------------> | Discord Service  | ---------------------> | User Discord |
+| (netra-backend)|  (Webhook / Event)     | (netra-discord)  |   (Direct Message)     | (DM Inbox)   |
++----------------+                        +------------------+                        +--------------+
+```
+
+### 4.1 Event Dispatch Payload Schema
+
+**Webhook Endpoint**: `POST /api/v1/events/discord-delivery` (Internal Backend $\rightarrow$ Discord Service bridge)  
+**Header**: `X-NETRA-Service-Secret: <DISCORD_SERVICE_SECRET>`
+
+```json
+{
+  "event_id": "evt_9988776655",
+  "event_type": "TASK_RESULT_DELIVERY",
+  "tenant_id": "ten_alpha123",
+  "user_id": "usr_44556677",
+  "target_discord_user_id": "123456789012345678",
+  "device_id": "dev_9a8b7c6d5e4f",
+  "task_id": "task_11223344",
+  "execution_id": "exec_998877",
+  "status": "COMPLETED",
+  "summary": {
+    "total_findings": 2,
+    "highest_severity": "HIGH",
+    "execution_time_ms": 840
+  },
+  "findings": [
+    {
+      "finding_id": "fin_012345",
+      "title": "Open Port Exposing Sensitive Service",
+      "category": "NETWORK",
+      "severity": "HIGH",
+      "fingerprint": "a8f7e6d5c4b3a2a1"
+    }
+  ],
+  "timestamp": "2026-08-15T10:15:00.000Z"
+}
+```
+
+### 4.2 Supported Event Types
+- `TASK_RESULT_DELIVERY`: Dispatched when a scan task finishes in `COMPLETED`, `FAILED`, or `TIMEOUT` status.
+- `SECURITY_ALERT_DELIVERY`: Dispatched immediately when a `HIGH` or `CRITICAL` vulnerability finding is discovered.
+
+### 4.3 Delivery Status Lifecycle & Retry Policy
+- **Statuses**: `PENDING` $\rightarrow$ `DELIVERED` | `FAILED` | `DM_DISABLED`.
+- **Retry Behavior**: Transient network or Discord rate-limit errors (HTTP 429) trigger exponential backoff retries (1s, 2s, 4s) up to a maximum of 3 attempts.
+- **Duplicate Event Handling**: The Discord Bot service checks `event_id` against an in-memory LRU deduplication cache (`X-Idempotency-Key: event_id`). If `event_id` was already processed, the duplicate event is dropped silently with an HTTP 200 ACK response.
+- **Disabled Direct Messages (DM) Fallback**: If the user has disabled DMs from server members (`DiscordAPIError [50007]: Cannot send messages to this user`), the Discord bot catches error code `50007`, sets event delivery status to `DM_DISABLED`, emits audit log event `DISCORD_DM_DELIVERY_FAILED`, and flags the scan results for manual retrieval via the `/findings` slash command.
+
 
 
