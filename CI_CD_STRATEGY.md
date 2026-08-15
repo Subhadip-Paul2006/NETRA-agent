@@ -216,3 +216,21 @@ jobs:
       - run: hatch build
 ```
 
+---
+
+## 3. Multi-Repository Release & Version Compatibility Matrix
+
+To prevent incompatible deployments across independent repository releases, NETRA enforces a Semantic Versioning (SemVer 2.0.0) compatibility matrix:
+
+| Backend Release (`netra-backend`) | Compatible Discord Bot (`netra-discord`) | Compatible Agent Package (`netra-agent`) | Protocol & API Contract Horizon |
+| :--- | :--- | :--- | :--- |
+| `v1.0.x` | `v1.0.x` | `v1.0.x` | Base REST API `/api/v1`, Ed25519 WSS v1 protocol, 7 capabilities. |
+| `v1.1.x` | `v1.0.x`, `v1.1.x` | `v1.0.x`, `v1.1.x` | Backwards-compatible `v1` field extensions; older agents fallback gracefully. |
+| `v2.0.x` | `v2.0.x` | `v2.0.x` | Major API contract change (`/api/v2`); requires backend and bot deployment sync. |
+
+### 3.1 Deployment Gate Rules
+1. **API Schema Contract Audit**: Agent client payload structures and Discord bot API client schemas MUST match OpenAPI specs in `netra-backend`.
+2. **Backwards Compatibility Shield**: Backend MUST maintain support for minor version agent packages (`v1.0.0` agent connected to `v1.1.0` backend) to prevent client host breakage during rolling upgrades.
+3. **Automated Compatibility Verification**: CI pipeline executes cross-repository contract verification tests using OpenAPI schema validation tools (`spectral` / `openapi-generator`).
+
+
