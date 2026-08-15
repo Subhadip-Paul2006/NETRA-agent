@@ -58,13 +58,25 @@ def test_cors_origins_json_array_parsing() -> None:
 def test_production_wildcard_cors_rejected() -> None:
     """Verify wildcard '*' CORS origins are rejected in production environment."""
     with pytest.raises(ValidationError) as exc_info:
-        Settings(env="production", allowed_origins=["*"])
+        Settings(
+            env="production",
+            allowed_origins=["*"],
+            database_url="postgresql+asyncpg://u:p@db/db",
+            jwt_secret="netra_prod_jwt_access_auth_key_32chars_long",
+            jwt_refresh_secret="netra_prod_jwt_refresh_auth_key_32chars",
+        )
     assert "Wildcard CORS origin '*' is strictly prohibited" in str(exc_info.value)
 
 
 def test_production_valid_cors_accepted() -> None:
     """Verify non-wildcard explicit CORS origins are accepted in production."""
-    settings = Settings(env="production", allowed_origins=["https://dashboard.netra.io"])
+    settings = Settings(
+        env="production",
+        allowed_origins=["https://dashboard.netra.io"],
+        database_url="postgresql+asyncpg://u:p@db/db",
+        jwt_secret="netra_prod_jwt_access_auth_key_32chars_long",
+        jwt_refresh_secret="netra_prod_jwt_refresh_auth_key_32chars",
+    )
     assert settings.env == "production"
     assert settings.allowed_origins == ["https://dashboard.netra.io"]
 
