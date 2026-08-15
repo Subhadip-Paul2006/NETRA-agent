@@ -1,0 +1,59 @@
+"""Ed25519 Cryptographic Utilities using Python's cryptography library."""
+
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ed25519
+
+
+def generate_ed25519_keypair() -> tuple[bytes, bytes]:
+    """Generate a new Ed25519 keypair.
+
+    Returns:
+        tuple[bytes, bytes]: (private_key_bytes, public_key_bytes) in raw byte format.
+    """
+    private_key = ed25519.Ed25519PrivateKey.generate()
+    public_key = private_key.public_key()
+
+    private_bytes = private_key.private_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PrivateFormat.Raw,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    public_bytes = public_key.public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    return private_bytes, public_bytes
+
+
+def sign_payload(private_key_bytes: bytes, payload: bytes) -> bytes:
+    """Sign a byte payload with an Ed25519 private key."""
+    private_key = ed25519.Ed25519PrivateKey.from_private_bytes(private_key_bytes)
+    return private_key.sign(payload)
+
+
+def verify_ed25519_signature(
+    public_key_input: str | bytes,
+    signature_input: str | bytes,
+    payload: bytes,
+) -> bool:
+    """Verify an Ed25519 signature against a payload using a public key.
+
+    Supports raw bytes or hex-encoded strings.
+    """
+    try:
+        if isinstance(public_key_input, str):
+            public_bytes = bytes.fromhex(public_key_input)
+        else:
+            public_bytes = public_key_input
+
+        if isinstance(signature_input, str):
+            sig_bytes = bytes.fromhex(signature_input)
+        else:
+            sig_bytes = signature_input
+
+        public_key = ed25519.Ed25519PublicKey.from_public_bytes(public_bytes)
+        public_key.verify(sig_bytes, payload)
+        return True
+    except (InvalidSignature, ValueError, TypeError):
+        return False
