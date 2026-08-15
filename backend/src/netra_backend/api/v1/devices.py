@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from netra_backend.database import get_db_session
@@ -187,9 +187,22 @@ async def enroll_device(
         )
         db.add(credential)
 
-        # Mark enrollment code as used atomically
-        code_entry.used_at = now
-        code_entry.used_by_device_id = device.id
+        # Atomic conditional update to mark enrollment code as used
+        update_stmt = (
+            update(EnrollmentCode)
+            .where(
+                EnrollmentCode.id == code_entry.id,
+                EnrollmentCode.used_at.is_(None),
+                EnrollmentCode.is_revoked == False,  # noqa: E712
+            )
+            .values(used_at=now, used_by_device_id=device.id)
+        )
+        update_res = await db.execute(update_stmt)
+        if getattr(update_res, "rowcount", 0) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Enrollment code has already been redeemed",
+            )
 
         await db.commit()
 
