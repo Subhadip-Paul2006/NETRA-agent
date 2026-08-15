@@ -1,8 +1,12 @@
-# NETRA GitHub Workflow & Contribution Guidelines
+# NETRA Git Workflow & Release Lifecycle
 
-## 1. Branch Strategy (Git Flow Variant)
+## 1. Monorepo Branching Model
 
-NETRA uses a structured branching model across all three repositories (`netra-backend`, `netra-discord`, `netra-agent`).
+NETRA uses a structured branching model within a **Unified Python Monorepo**:
+
+- `main`: Production-ready branch. Protected. Commits must originate from PRs with passing CI status.
+- `develop`: Integration branch for Phase feature development.
+- `feature/<name>`: Feature branches for service components (`feature/backend-auth`, `feature/agent-network-scan`, `feature/discord-dm-embeds`).
 
 ```
   main --------------------------------------------*------------ (v1.0.0 Release Tag)
@@ -12,7 +16,6 @@ NETRA uses a structured branching model across all three repositories (`netra-ba
   develop -------*-------------*---------------*---------------- (Integration)
                   \           / \             /
   feature/  -------*---------*   \-----------*------------------ (Short-lived topic branches)
-  agent-wss
 ```
 
 ### 1.1 Branch Naming Standards
