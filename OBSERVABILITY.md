@@ -2,14 +2,14 @@
 
 ## 1. Structured Logging Standard
 
-All NETRA services (`netra-backend`, `netra-discord`, `netra-agent`) emit structured JSON logs to standard output (`stdout`) to enable centralized log ingestion (Elasticsearch, Datadog, CloudWatch).
+All NETRA services (`backend`, `discord`, `agent`, `shared`) emit structured JSON logs to standard output (`stdout`) to enable centralized log ingestion (Elasticsearch, Datadog, CloudWatch).
 
 ### 1.1 JSON Log Schema Blueprint
 ```json
 {
-  "timestamp": "2026-08-14T21:50:00.123Z",
-  "level": "INFO",
-  "service": "netra-backend",
+  "timestamp": "2026-08-15T12:00:00.000Z",
+  "level": "info",
+  "service": "backend",
   "environment": "production",
   "context": {
     "tenant_id": "ten_01h23456789",
