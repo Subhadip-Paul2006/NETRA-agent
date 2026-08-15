@@ -2,7 +2,6 @@
 
 import time
 from datetime import UTC, datetime, timedelta
-from typing import List
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from pydantic import BaseModel
@@ -11,8 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from netra_backend.database import get_db_session
 from netra_backend.logging import get_logger
-from netra_backend.models import Device, DeviceCredential, DeviceCredentialStatus, NonceCache
+from netra_backend.models import Device, DeviceCredential, NonceCache
 from netra_shared.crypto import construct_canonical_payload, verify_ed25519_signature
+from netra_shared.enums import DeviceCredentialStatus
 
 logger = get_logger(__name__)
 
@@ -33,7 +33,7 @@ class AgentTasksResponse(BaseModel):
     """Agent Task Polling Response Envelope."""
 
     success: bool = True
-    tasks: List[AgentTaskItem]
+    tasks: list[AgentTaskItem]
 
 
 @router.get("/tasks", response_model=AgentTasksResponse)
