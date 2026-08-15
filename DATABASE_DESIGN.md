@@ -158,6 +158,7 @@ model Tenant {
   memberships     TenantMembership[]
   devices         Device[]
   tasks           Task[]
+  taskExecutions  TaskExecution[]
   findings        Finding[]
   discordBindings DiscordBinding[]
   auditEvents     AuditEvent[]
@@ -166,15 +167,16 @@ model Tenant {
 }
 
 model User {
-  id            String             @id @default(cuid())
-  email         String             @unique @db.VarChar(255)
-  passwordHash  String             @db.VarChar(255)
-  isActive      Boolean            @default(true)
-  createdAt     DateTime           @default(now())
-  updatedAt     DateTime           @updatedAt
+  id              String             @id @default(cuid())
+  email           String             @unique @db.VarChar(255)
+  passwordHash    String             @db.VarChar(255)
+  isActive        Boolean            @default(true)
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
 
-  memberships   TenantMembership[]
-  sessions      UserSession[]
+  memberships     TenantMembership[]
+  sessions        UserSession[]
+  discordBindings DiscordBinding[]
 
   @@map("users")
 }
@@ -208,6 +210,7 @@ model UserSession {
   user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+  @@index([refreshToken])
   @@map("user_sessions")
 }
 
@@ -237,26 +240,29 @@ model Device {
 model DeviceCredential {
   id               String    @id @default(cuid())
   deviceId         String    @unique
-  hashedKey        String    @db.VarChar(255)
+  publicKey        String    @db.VarChar(512)
+  algorithm        String    @default("Ed25519") @db.VarChar(20)
   rotationCount    Int       @default(0)
   lastRotatedAt    DateTime  @default(now())
 
   device           Device    @relation(fields: [deviceId], references: [id], onDelete: Cascade)
 
+  @@index([deviceId])
   @@map("device_credentials")
 }
 
 model AgentSession {
-  id           String    @id @default(cuid())
-  deviceId     String
-  connectionId String    @unique @db.VarChar(128)
-  ipAddress    String    @db.VarChar(45)
-  connectedAt  DateTime  @default(now())
+  id             String    @id @default(cuid())
+  deviceId       String
+  connectionId   String    @unique @db.VarChar(128)
+  ipAddress      String    @db.VarChar(45)
+  connectedAt    DateTime  @default(now())
   disconnectedAt DateTime?
 
-  device       Device    @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  device         Device    @relation(fields: [deviceId], references: [id], onDelete: Cascade)
 
   @@index([deviceId])
+  @@index([connectionId])
   @@map("agent_sessions")
 }
 
@@ -277,6 +283,7 @@ model Task {
 
   @@index([tenantId])
   @@index([tenantId, status])
+  @@index([deviceId])
   @@index([deviceId, status])
   @@map("tasks")
 }
@@ -293,9 +300,13 @@ model TaskExecution {
   errorMessage  String?    @db.Text
 
   task          Task       @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  tenant        Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
+  @@unique([taskId, executionId])
   @@index([taskId])
+  @@index([tenantId])
   @@index([tenantId, executionId])
+  @@index([requestId])
   @@map("task_executions")
 }
 
@@ -315,24 +326,29 @@ model Finding {
   device      Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
   task        Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
 
-  @@unique([tenantId, fingerprint])
+  @@unique([tenantId, deviceId, fingerprint])
   @@index([tenantId])
   @@index([tenantId, severity])
   @@index([deviceId])
+  @@index([taskId])
   @@map("findings")
 }
 
 model DiscordBinding {
-  id            String   @id @default(cuid())
-  tenantId      String
-  userId        String
-  discordUserId String   @unique @db.VarChar(64)
-  discordGuildId String? @db.VarChar(64)
-  createdAt     DateTime @default(now())
+  id             String   @id @default(cuid())
+  tenantId       String
+  userId         String
+  discordUserId  String   @unique @db.VarChar(64)
+  discordGuildId String?  @db.VarChar(64)
+  createdAt      DateTime @default(now())
 
-  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenant         Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+  @@unique([tenantId, userId])
   @@index([tenantId])
+  @@index([userId])
+  @@index([tenantId, userId])
   @@map("discord_bindings")
 }
 
@@ -353,3 +369,30 @@ model AuditEvent {
   @@map("audit_events")
 }
 ```
+
+---
+
+## 5. Formal DATABASE_INVARIANTS
+
+The NETRA relational store strictly enforces 7 non-negotiable database invariants. Any application code, migration script, or manual database query that violates these rules is treated as a fatal security/integrity bug.
+
+### INVARIANT 1: Tenant Context Isolation Guarantee
+Every non-system entity table (`TenantMembership`, `Device`, `Task`, `TaskExecution`, `Finding`, `DiscordBinding`, `AuditEvent`) MUST contain a mandatory, non-null `tenantId String` column with a foreign key constraint pointing to `tenants(id)` ON DELETE CASCADE, and MUST participate in PostgreSQL Row-Level Security (RLS) policies.
+
+### INVARIANT 2: Hierarchical Cascading Deletion Safety
+Deleting a `Tenant` record MUST automatically cascade delete all associated memberships, devices, tasks, executions, findings, discord bindings, and audit logs. Deleting a `Device` record MUST cascade delete its `DeviceCredential`, `AgentSession` history, `Task` records, and `Finding` entries without orphan row accumulation.
+
+### INVARIANT 3: Single Active Public Key Representation
+Every enrolled `Device` MUST maintain exactly 1 `DeviceCredential` record (`deviceId @unique`). Shared-secret HMAC keys and raw plaintext secrets are strictly forbidden; only valid Ed25519 public key strings (`publicKey`) formatted in hex or base64 are permitted.
+
+### INVARIANT 4: Idempotent Execution Uniqueness
+Task execution ingestion MUST be strictly idempotent. The compound constraint `@@unique([taskId, executionId])` and globally unique `executionId` in `TaskExecution` prevent double-ingestion or double-counting of scan result attempts.
+
+### INVARIANT 5: Per-Device Finding Fingerprint Deduplication
+The `Finding` entity enforces `@@unique([tenantId, deviceId, fingerprint])`. Deduplication of security findings occurs per target device slice within a tenant. The same vulnerability fingerprint discovered on Device A and Device B creates distinct findings without cross-device collision.
+
+### INVARIANT 6: User-Tenant & Discord Relationship Boundary
+A `User` may belong to multiple tenants via `TenantMembership` (`@@unique([tenantId, userId])`). A `DiscordBinding` MUST explicitly map to a valid `Tenant` and a valid `User` via foreign keys (`tenantId`, `userId`), enforcing single Discord account mapping per tenant scope (`@@unique([tenantId, userId])`).
+
+### INVARIANT 7: Immutable Audit Event Append-Only Storage
+`AuditEvent` records MUST NEVER be updated (`UPDATE` operations disallowed) or manually deleted (`DELETE` operations disallowed except via tenant cascade deletion). All audit logs remain append-only for enterprise compliance.
