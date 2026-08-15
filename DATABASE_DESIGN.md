@@ -157,13 +157,17 @@ Finding (fingerprint = stable vulnerability identity per tenant)
 
 ---
 
-## 5. SQLAlchemy 2.0 / SQLModel Blueprint (`backend/src/models/`)
+## 5. SQLAlchemy 2.0 Typed Declarative Blueprint (`backend/src/netra_backend/models/`)
 
 ```python
 from datetime import datetime
 from enum import Enum
 from typing import Optional, List, Dict, Any
-from sqlmodel import SQLModel, Field, Relationship, Column, JSON, String
+from sqlalchemy import String, ForeignKey, JSON, Enum as SQLEnum
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+class Base(DeclarativeBase):
+    pass
 
 class Role(str, Enum):
     ADMIN = "ADMIN"
