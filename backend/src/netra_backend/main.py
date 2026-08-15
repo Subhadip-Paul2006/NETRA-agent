@@ -11,6 +11,7 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from netra_backend.api.v1.auth import router as auth_router
 from netra_backend.api.v1.health import router as health_router
 from netra_backend.config import Settings, get_settings
 from netra_backend.logging import get_logger, setup_logging
@@ -80,6 +81,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # 5. Register API routes
     app.include_router(health_router, prefix=settings.api_prefix)
+    app.include_router(auth_router, prefix=f"{settings.api_prefix}/auth")
 
     return app
 
