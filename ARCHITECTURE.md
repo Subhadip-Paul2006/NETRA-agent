@@ -46,16 +46,6 @@ The final repository ownership and code layout are governed by Phase 0 architect
                           ┌──────────┴──────────┐
                           │                     │
                           ▼                     ▼
-                   Tenant/User data        Task/Findings
-                                    
-                                     ▲
-                                     │
-                           WebSocket / HTTPS
-                                     │
-                                     │
-                          ┌──────────┴──────────┐
-                          │                     │
-                          ▼                     ▼
                    NETRA Agent A          NETRA Agent B
                    User PC #1             User PC #2
                    Repo 3                 Repo 3
@@ -69,10 +59,18 @@ Discord and Local Agents **NEVER** communicate directly with each other. All con
 
 ```
 [ Discord User ] ──> [ Discord Control Plane (Repo 2) ] ──> [ NETRA Backend (Repo 1) ] ──> [ NETRA Agent (Repo 3) ]
-                                                                                                  │
-                                                                                                  ▼
-[ Discord User ] <── [ Discord Control Plane (Repo 2) ] <── [ NETRA Backend (Repo 1) ] <── [ Local Security Scan ]
+        │                                                                                           │
+        │ (4. Immediate Ephemeral Ack)                                                              │
+        ▼                                                                                           ▼
+[ Discord Channel ] <── [ Discord Bot Response ]                                          [ Local Security Scan ]
+        ▲                                                                                           │
+        │                                                                                           ▼
+        └────────────── [ Discord Direct Message (DM) ] <── [ NETRA Discord ] <── [ NETRA Backend ] ┘
 ```
+
+1. **Control Phase**: User triggers slash command in Discord $\rightarrow$ Bot posts to Backend $\rightarrow$ Backend returns instant queue acknowledgment $\rightarrow$ Bot renders `ephemeral: true` message ("Task queued...").
+2. **Execution Phase**: Backend dispatches task over outbound WSS $\rightarrow$ Agent executes pre-compiled scanner $\rightarrow$ Agent posts Ed25519 signed result payload to Backend.
+3. **Delivery Phase**: Backend verifies Ed25519 signature, persists findings inside PostgreSQL transaction, and emits event $\rightarrow$ Discord bot delivers full visual result embed directly to the user's **Discord Direct Messages (DMs)**.
 
 ---
 
@@ -84,11 +82,13 @@ Discord and Local Agents **NEVER** communicate directly with each other. All con
    - The local Python agent has zero awareness of Discord APIs.
    - The Discord bot has zero direct database connections and zero security scanning logic.
    - The Backend acts as the single source of truth, authorization layer, and coordination gateway.
-4. **Agent Communication Protocol**:
+4. **Agent Communication Protocol & Ed25519 Asymmetric Identity**:
    - **Primary**: Outbound persistent WSS (WebSocket) connection from Agent to Backend (`netra-agent` $\rightarrow$ `netra-backend`). Requires no open inbound ports on the user's PC.
    - **Fallback**: Authenticated HTTPS REST polling (`GET /tasks`, execute, `POST /results`) for restrictive network environments.
+   - **Identity**: Every payload signed with local Ed25519 private key (stored in OS protected storage); verified against PostgreSQL `DeviceCredential.publicKey`.
 5. **Controlled Capability Model**: No arbitrary remote shell command execution (`exec`/`eval` strictly prohibited). Control plane triggers pre-compiled, type-checked security audit capabilities (`SCAN_NETWORK`, `SCAN_PROCESSES`, `SCAN_FIREWALL`, etc.).
-6. **Pragmatic Production Design**: Minimal operational complexity. No premature addition of Kafka, Kubernetes, or microservices until concrete scale requirements demand it.
+6. **Asynchronous Discord Result Separation**: Initial slash command response is rendered strictly as `ephemeral: true` (acknowledgement only). Full scan results and security alerts are delivered directly to requesting users via Discord Direct Messages (DMs).
+7. **Pragmatic Production Design**: Minimal operational complexity. No premature addition of Kafka, Kubernetes, or microservices until concrete scale requirements demand it.
 
 ---
 
@@ -117,3 +117,9 @@ Discord and Local Agents **NEVER** communicate directly with each other. All con
 - **Why**: Allowing arbitrary remote shell execution from Discord or API controls introduces massive Remote Code Execution (RCE) vulnerabilities.
 - **Alternatives Considered**: Arbitrary shell command execution over SSH/Agent.
 - **Why Rejected**: High risk of command injection, privilege escalation, and host compromise if Discord bot or API credentials are breached.
+
+### ADR-05: Ed25519 Asymmetric Device Identity vs Shared-Secret HMAC
+- **Decision**: Enforce **Ed25519 Asymmetric Device Signatures**. Private key stored in client OS protected storage (Windows Credential Manager / Secret Service API / macOS Keychain); public key stored in PostgreSQL (`DeviceCredential.publicKey`).
+- **Why**: Prevents shared-secret server-side leakage, enforces non-repudiation, and guarantees that server-side database compromise cannot compromise client host private keys.
+- **Alternatives Considered**: Shared-secret HMAC-SHA256, RSA 4096.
+- **Why Rejected**: Shared secrets present server-side leakage risks if database backups are exposed. RSA 4096 signature creation/verification is significantly slower and generates large payloads compared to compact, ultra-fast 64-byte Ed25519 signatures.
