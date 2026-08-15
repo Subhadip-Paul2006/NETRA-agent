@@ -43,7 +43,7 @@
 ---
 
 ## Phase 2: Database, RLS, Identity & Tenancy (`backend/` & `shared/`)
-- **Goal**: Implement SQLAlchemy 2.0 / SQLModel entities (all 14 models + `NonceCache`), Alembic migrations in `backend/alembic/`, PostgreSQL 16 RLS policies, `with_tenant_context` async session context manager, Argon2 password hashing, and JWT authentication.
+- **Goal**: Implement SQLAlchemy 2.0 ORM entities (all 14 models + `NonceCache`), Alembic migrations in `backend/alembic/`, PostgreSQL 16 RLS policies, `with_tenant_context` async session context manager, Argon2 password hashing, and JWT authentication.
 - **Target Repository Components**: **`backend/`** & **`shared/`** (Python 3.11+ / SQLAlchemy 2.0 / AsyncPG / Alembic / PostgreSQL 16 / Argon2 / PyJWT)
 - **Files/Components**:
   - `backend/src/models/` (14 entities: `Tenant`, `User`, `TenantMembership`, `Device`, `DeviceCredential`, `AgentSession`, `Task`, `TaskExecution`, `Finding`, `FindingEvidence`, `DiscordBinding`, `DiscordSession`, `AuditEvent`, `EnrollmentCode`, `NonceCache`)
