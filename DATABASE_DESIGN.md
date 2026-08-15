@@ -9,9 +9,31 @@ NETRA uses **PostgreSQL 16** as its core relational data store and **Prisma ORM*
 
 ---
 
-## 2. Multi-Tenant Hierarchy & PostgreSQL Row-Level Security (RLS)
+## 2. Multi-Tenant Hierarchy & Identity Cardinality
 
-### 2.1 Entity Hierarchy Diagram
+### 2.1 Identity & Scoping Mapping Architecture
+
+NETRA enforces explicit cardinality across Discord identities, central user identities, tenant memberships, and devices:
+
+```
+Discord Account (discordUserId)
+      │ (1-to-1 Mapping)
+      ▼
+NETRA User Identity (User)
+      │ (1-to-Many Memberships)
+      ├── TenantMembership (Tenant Alpha, Role: ADMIN)
+      ├── TenantMembership (Tenant Beta, Role: OPERATOR)
+      └── TenantMembership (Tenant Gamma, Role: AUDITOR)
+```
+
+1. **1 Discord Identity $\leftrightarrow$ 1 NETRA User Identity**: A Discord account maps to exactly one central `User` identity globally (`User.discordUserId @unique`).
+2. **1 NETRA User $\leftrightarrow$ Many `TenantMembership` Records**: A user can belong to multiple tenants with role-based permissions (`TenantMembership` `@@unique([tenantId, userId])`).
+3. **1 Tenant $\leftrightarrow$ Many Users**: A tenant maintains multiple user members (`Tenant.memberships`).
+
+---
+
+### 2.2 Entity Relationship Diagram
+
 ```
                                  +-------------------+
                                  |      Tenant       |
@@ -96,19 +118,42 @@ Async background queue processors (e.g. task expiration sweepers, metric aggrega
 - **Application Runtime Role (`netra_app_user`)**: Restricted non-superuser role **WITHOUT** `BYPASSRLS` privileges. Used by the Node.js backend at runtime. RLS policies are strictly enforced on every query.
 
 #### G. Automated Integration Test Strategy for RLS
-The CI/CD test suite contains dedicated RLS enforcement tests:
-```typescript
-describe('PostgreSQL RLS Enforcement Verification', () => {
-  it('should return 0 rows when app_user queries findings without tenant context', async () => {
-    const rawResult = await rawAppUserClient.$queryRaw`SELECT * FROM findings;`;
-    expect(rawResult).toHaveLength(0); // Asserts zero data leaked
-  });
-});
-```
+The CI/CD test suite contains dedicated RLS enforcement tests asserting zero data leakage when querying without tenant context.
 
 ---
 
-## 4. Prisma Schema Blueprint (`prisma/schema.prisma`)
+## 4. Finding vs. FindingEvidence Model Semantics
+
+To prevent developer confusion between vulnerability definitions and scan execution attempts, NETRA strictly separates vulnerability identity from individual scan observations:
+
+### 4.1 Concept Definitions
+- **`Finding`**: Represents a normalized, ongoing security condition / vulnerability definition scoped to a tenant (`@@unique([tenantId, fingerprint])`). The `fingerprint` is a stable cryptographic SHA-256 hash derived from the vulnerability identity (e.g. `SHA-256(category + normalized_title + component)`).
+- **`FindingEvidence`**: Represents an individual scan observation/occurrence of that condition on a specific target device during a specific execution attempt (`findingId`, `deviceId`, `taskId`, `executionId`, `details`, `observedAt`).
+
+### 4.2 Structural Relationship Tree
+```
+Finding (fingerprint = stable vulnerability identity per tenant)
+     │
+     ├── FindingEvidence (Device A, Execution 1, Timestamp T1)
+     ├── FindingEvidence (Device A, Execution 2, Timestamp T2)
+     ├── FindingEvidence (Device B, Execution 3, Timestamp T3)
+     └── FindingEvidence (Device C, Execution 4, Timestamp T4)
+```
+
+### 4.3 Deduplication & State Transition Rules
+1. **`firstSeenAt`**: Timestamp recorded when the master `Finding` record is first created for a fingerprint within a tenant.
+2. **`lastSeenAt`**: Updated automatically whenever a new `FindingEvidence` observation arrives matching this fingerprint.
+3. **`severity`**: Current vulnerability severity (`INFO`, `LOW`, `MEDIUM`, `HIGH`, `CRITICAL`). If new evidence indicates an escalated severity, `severity` is updated on the master `Finding` and an audit log event (`FINDING_SEVERITY_ESCALATED`) is created.
+4. **`evidence` Insertion**: Every scan attempt observing a vulnerability creates a new `FindingEvidence` record linking `deviceId`, `taskId`, `executionId`, and raw JSON details without modifying the master `Finding` identity.
+5. **`status` Transitions**:
+   - `OPEN`: Set on initial finding discovery.
+   - `RESOLVED`: Set when a subsequent scan execution on all affected devices confirms the vulnerability condition no longer exists.
+   - `REOPENED`: Set automatically if a previously `RESOLVED` finding is observed again in a new scan execution.
+   - `MUTED`: Set manually by a tenant administrator to suppress alert notifications.
+
+---
+
+## 5. Prisma Schema Blueprint (`prisma/schema.prisma`)
 
 ```prisma
 datasource db {
@@ -147,23 +192,30 @@ enum Severity {
   CRITICAL
 }
 
-model Tenant {
-  id              String             @id @default(cuid())
-  name            String             @db.VarChar(100)
-  slug            String             @unique @db.VarChar(100)
-  createdAt       DateTime           @default(now())
-  updatedAt       DateTime           @updatedAt
+enum FindingStatus {
+  OPEN
+  RESOLVED
+  REOPENED
+  MUTED
+}
 
-  memberships     TenantMembership[]
-  devices         Device[]
-  tasks           Task[]
-  taskExecutions  TaskExecution[]
-  findings        Finding[]
+model Tenant {
+  id               String             @id @default(cuid())
+  name             String             @db.VarChar(100)
+  slug             String             @unique @db.VarChar(100)
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+
+  memberships      TenantMembership[]
+  devices          Device[]
+  tasks            Task[]
+  taskExecutions   TaskExecution[]
+  findings         Finding[]
   findingEvidences FindingEvidence[]
-  discordBindings DiscordBinding[]
-  discordSessions DiscordSession[]
-  auditEvents     AuditEvent[]
-  enrollmentCodes EnrollmentCode[]
+  discordBindings  DiscordBinding[]
+  discordSessions  DiscordSession[]
+  auditEvents      AuditEvent[]
+  enrollmentCodes  EnrollmentCode[]
 
   @@map("tenants")
 }
@@ -172,6 +224,7 @@ model User {
   id              String             @id @default(cuid())
   email           String             @unique @db.VarChar(255)
   passwordHash    String             @db.VarChar(255)
+  discordUserId   String?            @unique @db.VarChar(64)
   isActive        Boolean            @default(true)
   createdAt       DateTime           @default(now())
   updatedAt       DateTime           @updatedAt
@@ -321,6 +374,7 @@ model Finding {
   title       String            @db.VarChar(255)
   category    String            @db.VarChar(100)
   severity    Severity
+  status      FindingStatus     @default(OPEN)
   fingerprint String            @db.VarChar(64)
   firstSeenAt DateTime          @default(now())
   lastSeenAt  DateTime          @updatedAt
@@ -331,6 +385,7 @@ model Finding {
   @@unique([tenantId, fingerprint])
   @@index([tenantId])
   @@index([tenantId, severity])
+  @@index([tenantId, status])
   @@index([fingerprint])
   @@map("findings")
 }
@@ -374,7 +429,7 @@ model DiscordBinding {
   @@unique([tenantId, userId])
   @@index([tenantId])
   @@index([userId])
-  @@index([tenantId, userId])
+  @@index([discordUserId])
   @@map("discord_bindings")
 }
 
@@ -431,11 +486,22 @@ model EnrollmentCode {
   @@index([code])
   @@map("enrollment_codes")
 }
+
+model NonceCache {
+  id         String   @id @default(cuid())
+  deviceId   String   @db.VarChar(128)
+  nonce      String   @db.VarChar(128)
+  expiresAt  DateTime
+
+  @@unique([deviceId, nonce])
+  @@index([expiresAt])
+  @@map("nonce_caches")
+}
 ```
 
 ---
 
-## 5. Formal DATABASE_INVARIANTS
+## 6. Formal DATABASE_INVARIANTS
 
 The NETRA relational store strictly enforces 7 non-negotiable database invariants. Any application code, migration script, or manual database query that violates these rules is treated as a fatal security/integrity bug.
 
@@ -454,17 +520,18 @@ Task execution ingestion MUST be strictly idempotent. The compound constraint `@
 ### INVARIANT 5: Finding Identity vs Observation Separation
 The `Finding` entity enforces vulnerability definition identity per tenant slice (`@@unique([tenantId, fingerprint])`). Specific scan observations are recorded in `FindingEvidence` records referencing `deviceId`, `taskId`, and `executionId`. Multiple devices (or the same device over time) observing identical finding fingerprints link to the master `Finding` record without unique constraint collisions.
 
-### INVARIANT 6: User-Tenant & Discord Relationship Boundary
-A `User` may belong to multiple tenants via `TenantMembership` (`@@unique([tenantId, userId])`). A `DiscordBinding` MUST explicitly map to a valid `Tenant` and a valid `User` via foreign keys (`tenantId`, `userId`), enforcing single Discord account mapping per tenant scope (`@@unique([tenantId, userId])`).
+### INVARIANT 6: User-Tenant & Discord Identity Mapping Cardinality
+A Discord account maps to exactly 1 `User` identity globally (`User.discordUserId @unique`). A `User` may belong to multiple tenants via `TenantMembership` (`@@unique([tenantId, userId])`). A `DiscordBinding` links a `Tenant` and a `User` (`@@unique([tenantId, userId])`).
 
 ### INVARIANT 7: Immutable Audit Event Append-Only Storage
 `AuditEvent` records MUST NEVER be updated (`UPDATE` operations disallowed) or manually deleted (`DELETE` operations disallowed except via tenant cascade deletion). All audit logs remain append-only for enterprise compliance.
 
 ---
 
-## 6. Data Retention & Archival Policies
+## 7. Data Retention & Archival Policies
 
 1. **`AuditEvent` Retention**: Retained for 365 days in PostgreSQL main partition. Automated pg_cron partition pruning archives records older than 1 year to long-term cold storage before deletion.
 2. **`TaskExecution` Logs**: Successful execution metadata retained for 90 days. Failed/timed-out execution logs retained for 180 days for operational debugging.
-3. **`FindingEvidence` Observations**: Detailed evidence JSON details pruned after 180 days while preserving aggregate count and `firstSeenAt`/`lastSeenAt` metadata on master `Finding` records.
+3. **`FindingEvidence` Observations**: Detailed evidence JSON details pruned after 180 days while preserving aggregate count, `status`, and `firstSeenAt`/`lastSeenAt` metadata on master `Finding` records.
+4. **`NonceCache` Expiration**: Records in `nonce_caches` automatically cleaned up after 5-minute timestamp expiration window via background sweeper.
 
