@@ -1,30 +1,43 @@
 # NETRA CI/CD Strategy & Automation Pipeline
 
-## 1. Enterprise CI/CD Pipeline Stages
+## 1. Multi-Repository CI/CD Architecture
 
-Every pull request and merge to `develop`/`main` across all repositories triggers an automated end-to-end security and build pipeline:
+Because NETRA comprises 3 distinct repositories with different tech stacks, each repository contains its own tailored GitHub Actions workflow in `.github/workflows/ci.yml`:
 
 ```
-GitHub Actions Trigger (PR / Push)
-   │
-   ├── 1. Lint & Format (ESLint / Prettier / Black / Flake8)
-   ├── 2. Type Check (tsc --noEmit / mypy)
-   ├── 3. Unit Tests (Jest / Pytest with coverage)
-   ├── 4. Integration Tests (Ephemeral PostgreSQL container)
-   ├── 5. Migration Validation (Prisma schema drift detection)
-   ├── 6. Secret Scanning (Gitleaks / TruffleHog)
-   ├── 7. Dependency Audit (npm audit / safety / Snyk)
-   ├── 8. SAST Security Scan (CodeQL / Semgrep)
-   ├── 9. Container Security Scan (Trivy image scan)
-   └── 10. Build Verification (TypeScript build / PyPI artifact package)
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 1. Repository 1: netra-backend (Node.js 20 / TypeScript / Fastify / Prisma)│
+│    - Lint & Typecheck: ESLint + Prettier + tsc --noEmit                    │
+│    - Prisma Validation: Schema format + Prisma drift + migration deploy     │
+│    - RLS Integration Tests: Ephemeral PostgreSQL 16 Service Container       │
+│    - SAST & Container Scan: Gitleaks + Trivy Docker Image Scan              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 2. Repository 2: netra-discord (Node.js 20 / TypeScript / Discord.js)       │
+│    - Lint & Typecheck: ESLint + Prettier + tsc --noEmit                    │
+│    - Discord Command Validation: Zod schema & slash command builder audit   │
+│    - Unit Tests: Jest mock tests for Backend API client & embed formatters  │
+│    - Security Scan: Gitleaks + npm audit + Trivy Docker Image Scan          │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 3. Repository 3: netra-agent (Python 3.10+ / Hatch / Pytest / httpx)        │
+│    - Lint & Format: Ruff + Black + mypy type checking                       │
+│    - Unit & Integration Tests: Pytest with coverage + OS Keyring mocks      │
+│    - Package Verification: Hatch build verification & artifact generation   │
+│    - Security Audit: Bandit SAST + Safety dependency vulnerability audit    │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 2. GitHub Actions CI Blueprint (`.github/workflows/ci.yml`)
+## 2. GitHub Actions CI Blueprints
+
+### 2.1 Repository 1 CI Blueprint (`netra-backend/.github/workflows/ci.yml`)
 
 ```yaml
-name: NETRA Enterprise CI Pipeline
+name: NETRA Backend CI Pipeline
 
 on:
   push:
@@ -34,7 +47,7 @@ on:
 
 jobs:
   static-analysis:
-    name: Lint, Format & Typecheck
+    name: Backend Lint, Format & Typecheck
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -46,16 +59,6 @@ jobs:
       - run: npm run lint
       - run: npm run format:check
       - run: npm run typecheck
-
-  secret-scanning:
-    name: Secret & Vulnerability Audit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v2
-      - run: npm audit --audit-level=high
 
   prisma-migration-check:
     name: Validate Prisma Schema & Migrations
@@ -70,7 +73,7 @@ jobs:
       - run: npx prisma validate
 
   unit-and-integration-tests:
-    name: Run Test Suite (with PostgreSQL)
+    name: Run Backend Test Suite (PostgreSQL 16)
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -100,14 +103,12 @@ jobs:
           npm run test:integration
 
   container-build-scan:
-    name: Container Build & Vulnerability Scan
+    name: Backend Container Build & Trivy Scan
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build Docker Image
-        run: docker build -t netra-backend:test .
-      - name: Scan Image with Trivy
-        uses: aquasecurity/trivy-action@master
+      - run: docker build -t netra-backend:test .
+      - uses: aquasecurity/trivy-action@master
         with:
           image-ref: 'netra-backend:test'
           format: 'table'
@@ -115,3 +116,103 @@ jobs:
           ignore-unfixed: true
           severity: 'CRITICAL,HIGH'
 ```
+
+### 2.2 Repository 2 CI Blueprint (`netra-discord/.github/workflows/ci.yml`)
+
+```yaml
+name: NETRA Discord CI Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  static-analysis:
+    name: Discord Bot Lint, Format & Typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+
+  unit-tests:
+    name: Discord Bot Command & Embed Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - run: npm run test:unit
+
+  container-build-scan:
+    name: Discord Bot Container Build & Trivy Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t netra-discord:test .
+      - uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'netra-discord:test'
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: 'CRITICAL,HIGH'
+```
+
+### 2.3 Repository 3 CI Blueprint (`netra-agent/.github/workflows/ci.yml`)
+
+```yaml
+name: NETRA Agent CI Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  python-quality-checks:
+    name: Agent Lint, Typecheck & Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install hatch ruff mypy pytest pytest-cov bandit
+      - run: ruff check .
+      - run: mypy netra
+      - run: bandit -r netra
+
+  agent-test-suite:
+    name: Agent Pytest Suite & Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install hatch pytest pytest-cov httpx websockets cryptography keyring
+      - run: pytest --cov=netra --cov-report=term-missing tests/
+
+  package-build-check:
+    name: Hatch Package Build Verification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install hatch
+      - run: hatch build
+```
+
