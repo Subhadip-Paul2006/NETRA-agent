@@ -70,5 +70,5 @@ NETRA services expose Prometheus-compatible operational metrics for real-time mo
 ## 4. Secret Sanitization & Data Masking Rules
 
 The logging framework strictly enforces automated redaction of sensitive fields prior to serialization:
-- **Redacted Fields**: `password`, `passwordHash`, `token`, `jwt`, `device_secret`, `DISCORD_BOT_TOKEN`, `authorization`, `signature`, `cookie`.
+- **Redacted Fields**: `password`, `passwordHash`, `token`, `jwt`, `privateKey`, `private_key`, `DISCORD_BOT_TOKEN`, `authorization`, `signature`, `cookie`.
 - **Masking Mechanism**: Regex patterns replace sensitive keys with `"[REDACTED]"`.
