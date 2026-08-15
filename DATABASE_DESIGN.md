@@ -2,10 +2,10 @@
 
 ## 1. PostgreSQL Engine & Schema Governance
 
-NETRA uses **PostgreSQL 16** as its core relational data store and **Prisma ORM** for type-safe query building and schema migration management.
+NETRA uses **PostgreSQL 16** as its core relational data store, **SQLAlchemy 2.0 (AsyncPG)** for type-safe async query building, and **Alembic** for schema migrations.
 
-- **Schema Single Source of Truth**: `prisma/schema.prisma` lives strictly in **Repository 1 (`netra-backend`)**.
-- **No Direct DB Access in Repos 2 & 3**: Neither `netra-discord` nor `netra-agent` connect to PostgreSQL directly.
+- **Schema Single Source of Truth**: SQLAlchemy entity models live in `backend/src/models/` and Alembic migrations reside strictly in `backend/alembic/`.
+- **No Direct DB Access in Services 2 & 3**: Neither `discord/` nor `agent/` connect to PostgreSQL directly.
 
 ---
 
@@ -26,8 +26,8 @@ NETRA User Identity (User)
       └── TenantMembership (Tenant Gamma, Role: AUDITOR)
 ```
 
-1. **1 Discord Identity $\leftrightarrow$ 1 NETRA User Identity**: A Discord account maps to exactly one central `User` identity globally (`User.discordUserId @unique`).
-2. **1 NETRA User $\leftrightarrow$ Many `TenantMembership` Records**: A user can belong to multiple tenants with role-based permissions (`TenantMembership` `@@unique([tenantId, userId])`).
+1. **1 Discord Identity $\leftrightarrow$ 1 NETRA User Identity**: A Discord account maps to exactly one central `User` identity globally (`User.discord_user_id` unique).
+2. **1 NETRA User $\leftrightarrow$ Many `TenantMembership` Records**: A user can belong to multiple tenants with role-based permissions (`TenantMembership` `unique(tenant_id, user_id)`).
 3. **1 Tenant $\leftrightarrow$ Many Users**: A tenant maintains multiple user members (`Tenant.memberships`).
 
 ---
@@ -62,28 +62,32 @@ NETRA User Identity (User)
 
 ---
 
-## 3. Deep Technical RLS Architecture & Prisma Validation
+## 3. Deep Technical RLS Architecture & Async Session Context
 
-### 3.1 Prisma Interactive Transaction Pattern (`withTenantContext`)
-Prisma does not natively attach session parameters to standard queries. NETRA enforces RLS by wrapping all tenant-scoped database interactions inside Prisma Interactive Transactions using `SET LOCAL`:
+### 3.1 SQLAlchemy Async Session Pattern (`with_tenant_context`)
+SQLAlchemy AsyncSession does not automatically attach session configuration variables to raw queries. NETRA enforces RLS by wrapping all tenant-scoped database interactions inside an async context manager executing `SET LOCAL`:
 
-```typescript
-export async function withTenantContext<T>(
-  tenantId: string,
-  fn: (tx: Prisma.TransactionClient) => Promise<T>
-): Promise<T> {
-  if (!tenantId || tenantId.trim() === '') {
-    throw new Error('SECURITY_FATAL: MissingTenantContextException - Cannot query database without resolved tenantId');
-  }
+```python
+from contextlib import asynccontextmanager
+from sqlalchemy.ext.asyncio import AsyncSession
+import sqlalchemy
 
-  return await prisma.$transaction(async (tx) => {
-    // 1. Establish transaction-scoped GUC (Grand Unified Configuration) variable
-    await tx.$executeRaw`SELECT set_config('app.current_tenant_id', ${tenantId}, true);`;
+@asynccontextmanager
+async def with_tenant_context(tenant_id: str, session: AsyncSession):
+    if not tenant_id or not tenant_id.strip():
+        raise ValueError(
+            "SECURITY_FATAL: MissingTenantContextException - Cannot query database without resolved tenant_id"
+        )
 
-    // 2. Execute target domain queries safely inside protected transaction scope
-    return await fn(tx);
-  });
-}
+    # 1. Establish transaction-scoped GUC variable (SET LOCAL)
+    await session.execute(
+        sqlalchemy.text("SELECT set_config('app.current_tenant_id', :tenant_id, true)"),
+        {"tenant_id": tenant_id}
+    )
+    try:
+        yield session
+    finally:
+        pass
 ```
 
 ### 3.2 Key RLS Technical Attributes & Operational Security Rules
@@ -108,17 +112,17 @@ CREATE POLICY tenant_isolation_policy ON findings
 - **Zero-Data Leak Guarantee**: In SQL, `tenant_id = NULL` evaluates to `FALSE` for all rows. Therefore, if a developer mistakenly executes a query without initializing tenant context, PostgreSQL returns **0 rows** instead of leaking multi-tenant data!
 
 #### D. Defense-in-Depth: Application AuthZ + Database RLS
-PostgreSQL RLS acts as a secondary defense layer. Application middleware MUST STILL validate JWT tenant claims and resource ownership before dispatching queries. RLS guarantees that even if a developer omits a `WHERE tenant_id = ?` clause in TypeScript, cross-tenant data access is physically impossible at the database engine layer.
+PostgreSQL RLS acts as a secondary defense layer. Application middleware MUST STILL validate JWT tenant claims and resource ownership before dispatching queries. RLS guarantees that even if a developer omits a `WHERE tenant_id = ?` clause in Python, cross-tenant data access is physically impossible at the database engine layer.
 
 #### E. Background Worker Tenant Context Resolution
-Async background queue processors (e.g. task expiration sweepers, metric aggregators) MUST NOT run un-scoped global queries. Every worker task fetches the target `tenantId` from the queue payload and wraps execution inside `withTenantContext(tenantId, async (tx) => { ... })`.
+Async background queue processors (e.g. task expiration sweepers, metric aggregators) MUST NOT run un-scoped global queries. Every worker task fetches the target `tenant_id` from the queue payload and wraps execution inside `async with with_tenant_context(tenant_id, session):`.
 
 #### F. Database User Roles & Migration Strategy
-- **Migration Role (`netra_migration_runner`)**: Granted `SUPERUSER` or `BYPASSRLS` privileges. Used strictly during deployment pipelines (`npx prisma migrate deploy`) to alter DDL and execute schema migrations.
-- **Application Runtime Role (`netra_app_user`)**: Restricted non-superuser role **WITHOUT** `BYPASSRLS` privileges. Used by the Node.js backend at runtime. RLS policies are strictly enforced on every query.
+- **Migration Role (`netra_migration_runner`)**: Granted `SUPERUSER` or `BYPASSRLS` privileges. Used strictly during deployment pipelines (`alembic upgrade head`) to alter DDL and execute schema migrations.
+- **Application Runtime Role (`netra_app_user`)**: Restricted non-superuser role **WITHOUT** `BYPASSRLS` privileges. Used by the Python backend at runtime. RLS policies are strictly enforced on every query.
 
 #### G. Automated Integration Test Strategy for RLS
-The CI/CD test suite contains dedicated RLS enforcement tests asserting zero data leakage when querying without tenant context.
+The CI/CD test suite contains dedicated Pytest integration tests asserting zero data leakage when querying without tenant context.
 
 ---
 
@@ -127,8 +131,8 @@ The CI/CD test suite contains dedicated RLS enforcement tests asserting zero dat
 To prevent developer confusion between vulnerability definitions and scan execution attempts, NETRA strictly separates vulnerability identity from individual scan observations:
 
 ### 4.1 Concept Definitions
-- **`Finding`**: Represents a normalized, ongoing security condition / vulnerability definition scoped to a tenant (`@@unique([tenantId, fingerprint])`). The `fingerprint` is a stable cryptographic SHA-256 hash derived from the vulnerability identity (e.g. `SHA-256(category + normalized_title + component)`).
-- **`FindingEvidence`**: Represents an individual scan observation/occurrence of that condition on a specific target device during a specific execution attempt (`findingId`, `deviceId`, `taskId`, `executionId`, `details`, `observedAt`).
+- **`Finding`**: Represents a normalized, ongoing security condition / vulnerability definition scoped to a tenant (`unique(tenant_id, fingerprint)`). The `fingerprint` is a stable cryptographic SHA-256 hash derived from the vulnerability identity (e.g. `SHA-256(category + normalized_title + component)`).
+- **`FindingEvidence`**: Represents an individual scan observation/occurrence of that condition on a specific target device during a specific execution attempt (`finding_id`, `device_id`, `task_id`, `execution_id`, `details`, `observed_at`).
 
 ### 4.2 Structural Relationship Tree
 ```
@@ -141,10 +145,10 @@ Finding (fingerprint = stable vulnerability identity per tenant)
 ```
 
 ### 4.3 Deduplication & State Transition Rules
-1. **`firstSeenAt`**: Timestamp recorded when the master `Finding` record is first created for a fingerprint within a tenant.
-2. **`lastSeenAt`**: Updated automatically whenever a new `FindingEvidence` observation arrives matching this fingerprint.
+1. **`first_seen_at`**: Timestamp recorded when the master `Finding` record is first created for a fingerprint within a tenant.
+2. **`last_seen_at`**: Updated automatically whenever a new `FindingEvidence` observation arrives matching this fingerprint.
 3. **`severity`**: Current vulnerability severity (`INFO`, `LOW`, `MEDIUM`, `HIGH`, `CRITICAL`). If new evidence indicates an escalated severity, `severity` is updated on the master `Finding` and an audit log event (`FINDING_SEVERITY_ESCALATED`) is created.
-4. **`evidence` Insertion**: Every scan attempt observing a vulnerability creates a new `FindingEvidence` record linking `deviceId`, `taskId`, `executionId`, and raw JSON details without modifying the master `Finding` identity.
+4. **`evidence` Insertion**: Every scan attempt observing a vulnerability creates a new `FindingEvidence` record linking `device_id`, `task_id`, `execution_id`, and raw JSON details without modifying the master `Finding` identity.
 5. **`status` Transitions**:
    - `OPEN`: Set on initial finding discovery.
    - `RESOLVED`: Set when a subsequent scan execution on all affected devices confirms the vulnerability condition no longer exists.
@@ -153,351 +157,224 @@ Finding (fingerprint = stable vulnerability identity per tenant)
 
 ---
 
-## 5. Prisma Schema Blueprint (`prisma/schema.prisma`)
+## 5. SQLAlchemy 2.0 / SQLModel Blueprint (`backend/src/models/`)
 
-```prisma
-datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
-}
+```python
+from datetime import datetime
+from enum import Enum
+from typing import Optional, List, Dict, Any
+from sqlmodel import SQLModel, Field, Relationship, Column, JSON, String
 
-generator client {
-  provider = "prisma-client-js"
-}
+class Role(str, Enum):
+    ADMIN = "ADMIN"
+    OPERATOR = "OPERATOR"
+    AUDITOR = "AUDITOR"
 
-enum Role {
-  ADMIN
-  OPERATOR
-  AUDITOR
-}
+class TaskStatus(str, Enum):
+    CREATED = "CREATED"
+    QUEUED = "QUEUED"
+    DELIVERED = "DELIVERED"
+    ACKNOWLEDGED = "ACKNOWLEDGED"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    EXPIRED = "EXPIRED"
+    TIMEOUT = "TIMEOUT"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
 
-enum TaskStatus {
-  CREATED
-  QUEUED
-  DELIVERED
-  ACKNOWLEDGED
-  RUNNING
-  COMPLETED
-  EXPIRED
-  TIMEOUT
-  FAILED
-  CANCELLED
-}
+class Severity(str, Enum):
+    INFO = "INFO"
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+    CRITICAL = "CRITICAL"
 
-enum Severity {
-  INFO
-  LOW
-  MEDIUM
-  HIGH
-  CRITICAL
-}
+class FindingStatus(str, Enum):
+    OPEN = "OPEN"
+    RESOLVED = "RESOLVED"
+    REOPENED = "REOPENED"
+    MUTED = "MUTED"
 
-enum FindingStatus {
-  OPEN
-  RESOLVED
-  REOPENED
-  MUTED
-}
+class Tenant(SQLModel, table=True):
+    __tablename__ = "tenants"
 
-model Tenant {
-  id               String             @id @default(cuid())
-  name             String             @db.VarChar(100)
-  slug             String             @unique @db.VarChar(100)
-  createdAt        DateTime           @default(now())
-  updatedAt        DateTime           @updatedAt
+    id: str = Field(default=None, primary_key=True)
+    name: str = Field(sa_column=Column(String(100), nullable=False))
+    slug: str = Field(sa_column=Column(String(100), unique=True, nullable=False, index=True))
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
 
-  memberships      TenantMembership[]
-  devices          Device[]
-  tasks            Task[]
-  taskExecutions   TaskExecution[]
-  findings         Finding[]
-  findingEvidences FindingEvidence[]
-  discordBindings  DiscordBinding[]
-  discordSessions  DiscordSession[]
-  auditEvents      AuditEvent[]
-  enrollmentCodes  EnrollmentCode[]
+class User(SQLModel, table=True):
+    __tablename__ = "users"
 
-  @@map("tenants")
-}
+    id: str = Field(default=None, primary_key=True)
+    email: str = Field(sa_column=Column(String(255), unique=True, nullable=False, index=True))
+    password_hash: str = Field(sa_column=Column(String(255), nullable=False))
+    discord_user_id: Optional[str] = Field(sa_column=Column(String(64), unique=True, nullable=True, index=True))
+    is_active: bool = Field(default=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
 
-model User {
-  id              String             @id @default(cuid())
-  email           String             @unique @db.VarChar(255)
-  passwordHash    String             @db.VarChar(255)
-  discordUserId   String?            @unique @db.VarChar(64)
-  isActive        Boolean            @default(true)
-  createdAt       DateTime           @default(now())
-  updatedAt       DateTime           @updatedAt
+class TenantMembership(SQLModel, table=True):
+    __tablename__ = "tenant_memberships"
 
-  memberships     TenantMembership[]
-  sessions        UserSession[]
-  discordBindings DiscordBinding[]
-  discordSessions DiscordSession[]
-  createdCodes    EnrollmentCode[]
+    id: str = Field(default=None, primary_key=True)
+    tenant_id: str = Field(foreign_key="tenants.id", index=True, nullable=False)
+    user_id: str = Field(foreign_key="users.id", index=True, nullable=False)
+    role: Role = Field(default=Role.OPERATOR)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
 
-  @@map("users")
-}
+class UserSession(SQLModel, table=True):
+    __tablename__ = "user_sessions"
 
-model TenantMembership {
-  id        String   @id @default(cuid())
-  tenantId  String
-  userId    String
-  role      Role     @default(OPERATOR)
-  createdAt DateTime @default(now())
+    id: str = Field(default=None, primary_key=True)
+    user_id: str = Field(foreign_key="users.id", index=True, nullable=False)
+    refresh_token: str = Field(sa_column=Column(String(512), unique=True, nullable=False, index=True))
+    ip_address: str = Field(sa_column=Column(String(45), nullable=False))
+    user_agent: str = Field(sa_column=Column(String(255), nullable=False))
+    expires_at: datetime = Field(nullable=False)
+    revoked_at: Optional[datetime] = Field(default=None)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
 
-  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+class Device(SQLModel, table=True):
+    __tablename__ = "devices"
 
-  @@unique([tenantId, userId])
-  @@index([tenantId])
-  @@index([userId])
-  @@map("tenant_memberships")
-}
+    id: str = Field(default=None, primary_key=True)
+    tenant_id: str = Field(foreign_key="tenants.id", index=True, nullable=False)
+    hostname: str = Field(sa_column=Column(String(255), nullable=False))
+    os: str = Field(sa_column=Column(String(50), nullable=False))
+    architecture: str = Field(sa_column=Column(String(50), nullable=False))
+    agent_version: str = Field(sa_column=Column(String(20), nullable=False))
+    is_paired: bool = Field(default=True)
+    last_heartbeat_at: Optional[datetime] = Field(default=None)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
 
-model UserSession {
-  id           String    @id @default(cuid())
-  userId       String
-  refreshToken String    @unique @db.VarChar(512)
-  ipAddress    String    @db.VarChar(45)
-  userAgent    String    @db.VarChar(255)
-  expiresAt    DateTime
-  revokedAt    DateTime?
-  createdAt    DateTime  @default(now())
+class DeviceCredential(SQLModel, table=True):
+    __tablename__ = "device_credentials"
 
-  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+    id: str = Field(default=None, primary_key=True)
+    device_id: str = Field(foreign_key="devices.id", unique=True, index=True, nullable=False)
+    public_key: str = Field(sa_column=Column(String(512), nullable=False))
+    algorithm: str = Field(default="Ed25519")
+    rotation_count: int = Field(default=0)
+    last_rotated_at: datetime = Field(default_factory=datetime.utcnow)
 
-  @@index([userId])
-  @@index([refreshToken])
-  @@map("user_sessions")
-}
+class AgentSession(SQLModel, table=True):
+    __tablename__ = "agent_sessions"
 
-model Device {
-  id               String            @id @default(cuid())
-  tenantId         String
-  hostname         String            @db.VarChar(255)
-  os               String            @db.VarChar(50)
-  architecture     String            @db.VarChar(50)
-  agentVersion     String            @db.VarChar(20)
-  isPaired         Boolean           @default(true)
-  lastHeartbeatAt  DateTime?
-  createdAt        DateTime          @default(now())
-  updatedAt        DateTime          @updatedAt
+    id: str = Field(default=None, primary_key=True)
+    device_id: str = Field(foreign_key="devices.id", index=True, nullable=False)
+    connection_id: str = Field(sa_column=Column(String(128), unique=True, nullable=False, index=True))
+    ip_address: str = Field(sa_column=Column(String(45), nullable=False))
+    connected_at: datetime = Field(default_factory=datetime.utcnow)
+    disconnected_at: Optional[datetime] = Field(default=None)
 
-  tenant           Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  credential       DeviceCredential?
-  sessions         AgentSession[]
-  tasks            Task[]
-  evidences        FindingEvidence[]
+class Task(SQLModel, table=True):
+    __tablename__ = "tasks"
 
-  @@index([tenantId])
-  @@index([tenantId, isPaired])
-  @@map("devices")
-}
+    id: str = Field(default=None, primary_key=True)
+    tenant_id: str = Field(foreign_key="tenants.id", index=True, nullable=False)
+    device_id: str = Field(foreign_key="devices.id", index=True, nullable=False)
+    capability: str = Field(sa_column=Column(String(100), nullable=False))
+    parameters: Dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    status: TaskStatus = Field(default=TaskStatus.CREATED)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
 
-model DeviceCredential {
-  id               String    @id @default(cuid())
-  deviceId         String    @unique
-  publicKey        String    @db.VarChar(512)
-  algorithm        String    @default("Ed25519") @db.VarChar(20)
-  rotationCount    Int       @default(0)
-  lastRotatedAt    DateTime  @default(now())
+class TaskExecution(SQLModel, table=True):
+    __tablename__ = "task_executions"
 
-  device           Device    @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+    id: str = Field(default=None, primary_key=True)
+    task_id: str = Field(foreign_key="tasks.id", index=True, nullable=False)
+    tenant_id: str = Field(foreign_key="tenants.id", index=True, nullable=False)
+    execution_id: str = Field(sa_column=Column(String(128), unique=True, nullable=False, index=True))
+    request_id: str = Field(sa_column=Column(String(128), nullable=False))
+    status: TaskStatus = Field(nullable=False)
+    started_at: datetime = Field(default_factory=datetime.utcnow)
+    completed_at: Optional[datetime] = Field(default=None)
+    error_message: Optional[str] = Field(default=None)
 
-  @@index([deviceId])
-  @@map("device_credentials")
-}
+class Finding(SQLModel, table=True):
+    __tablename__ = "findings"
 
-model AgentSession {
-  id             String    @id @default(cuid())
-  deviceId       String
-  connectionId   String    @unique @db.VarChar(128)
-  ipAddress      String    @db.VarChar(45)
-  connectedAt    DateTime  @default(now())
-  disconnectedAt DateTime?
+    id: str = Field(default=None, primary_key=True)
+    tenant_id: str = Field(foreign_key="tenants.id", index=True, nullable=False)
+    title: str = Field(sa_column=Column(String(255), nullable=False))
+    category: str = Field(sa_column=Column(String(100), nullable=False))
+    severity: Severity = Field(nullable=False)
+    status: FindingStatus = Field(default=FindingStatus.OPEN)
+    fingerprint: str = Field(sa_column=Column(String(64), nullable=False, index=True))
+    first_seen_at: datetime = Field(default_factory=datetime.utcnow)
+    last_seen_at: datetime = Field(default_factory=datetime.utcnow)
 
-  device         Device    @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+class FindingEvidence(SQLModel, table=True):
+    __tablename__ = "finding_evidences"
 
-  @@index([deviceId])
-  @@index([connectionId])
-  @@map("agent_sessions")
-}
+    id: str = Field(default=None, primary_key=True)
+    tenant_id: str = Field(foreign_key="tenants.id", index=True, nullable=False)
+    finding_id: str = Field(foreign_key="findings.id", index=True, nullable=False)
+    device_id: str = Field(foreign_key="devices.id", index=True, nullable=False)
+    task_id: str = Field(foreign_key="tasks.id", index=True, nullable=False)
+    execution_id: str = Field(foreign_key="task_executions.execution_id", index=True, nullable=False)
+    details: Dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    observed_at: datetime = Field(default_factory=datetime.utcnow)
 
-model Task {
-  id            String            @id @default(cuid())
-  tenantId      String
-  deviceId      String
-  capability    String            @db.VarChar(100)
-  parameters    Json              @default("{}")
-  status        TaskStatus        @default(CREATED)
-  createdAt     DateTime          @default(now())
-  updatedAt     DateTime          @updatedAt
+class DiscordBinding(SQLModel, table=True):
+    __tablename__ = "discord_bindings"
 
-  tenant        Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  device        Device            @relation(fields: [deviceId], references: [id], onDelete: Cascade)
-  executions    TaskExecution[]
-  evidences     FindingEvidence[]
+    id: str = Field(default=None, primary_key=True)
+    tenant_id: str = Field(foreign_key="tenants.id", index=True, nullable=False)
+    user_id: str = Field(foreign_key="users.id", index=True, nullable=False)
+    discord_user_id: str = Field(sa_column=Column(String(64), unique=True, nullable=False, index=True))
+    discord_guild_id: Optional[str] = Field(sa_column=Column(String(64), nullable=True))
+    created_at: datetime = Field(default_factory=datetime.utcnow)
 
-  @@index([tenantId])
-  @@index([tenantId, status])
-  @@index([deviceId])
-  @@index([deviceId, status])
-  @@map("tasks")
-}
+class DiscordSession(SQLModel, table=True):
+    __tablename__ = "discord_sessions"
 
-model TaskExecution {
-  id            String            @id @default(cuid())
-  taskId        String
-  tenantId      String
-  executionId   String            @unique @db.VarChar(128)
-  requestId     String            @db.VarChar(128)
-  status        TaskStatus
-  startedAt     DateTime          @default(now())
-  completedAt   DateTime?
-  errorMessage  String?           @db.Text
+    id: str = Field(default=None, primary_key=True)
+    tenant_id: str = Field(foreign_key="tenants.id", index=True, nullable=False)
+    user_id: str = Field(foreign_key="users.id", index=True, nullable=False)
+    discord_user_id: str = Field(sa_column=Column(String(64), nullable=False))
+    session_token: str = Field(sa_column=Column(String(512), unique=True, nullable=False, index=True))
+    expires_at: datetime = Field(nullable=False)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
 
-  task          Task              @relation(fields: [taskId], references: [id], onDelete: Cascade)
-  tenant        Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  evidences     FindingEvidence[]
+class AuditEvent(SQLModel, table=True):
+    __tablename__ = "audit_events"
 
-  @@unique([taskId, executionId])
-  @@index([taskId])
-  @@index([tenantId])
-  @@index([tenantId, executionId])
-  @@index([requestId])
-  @@map("task_executions")
-}
+    id: str = Field(default=None, primary_key=True)
+    tenant_id: str = Field(foreign_key="tenants.id", index=True, nullable=False)
+    actor_id: str = Field(sa_column=Column(String(100), nullable=False))
+    actor_type: str = Field(sa_column=Column(String(20), nullable=False))
+    event: str = Field(sa_column=Column(String(100), nullable=False))
+    details: Dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    ip_address: Optional[str] = Field(sa_column=Column(String(45), nullable=True))
+    created_at: datetime = Field(default_factory=datetime.utcnow)
 
-model Finding {
-  id          String            @id @default(cuid())
-  tenantId    String
-  title       String            @db.VarChar(255)
-  category    String            @db.VarChar(100)
-  severity    Severity
-  status      FindingStatus     @default(OPEN)
-  fingerprint String            @db.VarChar(64)
-  firstSeenAt DateTime          @default(now())
-  lastSeenAt  DateTime          @updatedAt
+class EnrollmentCode(SQLModel, table=True):
+    __tablename__ = "enrollment_codes"
 
-  tenant      Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  evidences   FindingEvidence[]
+    id: str = Field(default=None, primary_key=True)
+    tenant_id: str = Field(foreign_key="tenants.id", index=True, nullable=False)
+    created_by_id: str = Field(foreign_key="users.id", nullable=False)
+    code: str = Field(sa_column=Column(String(32), unique=True, nullable=False, index=True))
+    expires_at: datetime = Field(nullable=False)
+    used_at: Optional[datetime] = Field(default=None)
+    used_by_device_id: Optional[str] = Field(default=None)
+    is_revoked: bool = Field(default=False)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
 
-  @@unique([tenantId, fingerprint])
-  @@index([tenantId])
-  @@index([tenantId, severity])
-  @@index([tenantId, status])
-  @@index([fingerprint])
-  @@map("findings")
-}
+class NonceCache(SQLModel, table=True):
+    __tablename__ = "nonce_caches"
 
-model FindingEvidence {
-  id          String        @id @default(cuid())
-  tenantId    String
-  findingId   String
-  deviceId    String
-  taskId      String
-  executionId String
-  details     Json          @default("{}")
-  observedAt  DateTime      @default(now())
-
-  tenant      Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  finding     Finding       @relation(fields: [findingId], references: [id], onDelete: Cascade)
-  device      Device        @relation(fields: [deviceId], references: [id], onDelete: Cascade)
-  task        Task          @relation(fields: [taskId], references: [id], onDelete: Cascade)
-  execution   TaskExecution @relation(fields: [executionId], references: [executionId], onDelete: Cascade)
-
-  @@index([tenantId])
-  @@index([findingId])
-  @@index([deviceId])
-  @@index([taskId])
-  @@index([executionId])
-  @@index([observedAt])
-  @@map("finding_evidences")
-}
-
-model DiscordBinding {
-  id             String   @id @default(cuid())
-  tenantId       String
-  userId         String
-  discordUserId  String   @unique @db.VarChar(64)
-  discordGuildId String?  @db.VarChar(64)
-  createdAt      DateTime @default(now())
-
-  tenant         Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@unique([tenantId, userId])
-  @@index([tenantId])
-  @@index([userId])
-  @@index([discordUserId])
-  @@map("discord_bindings")
-}
-
-model DiscordSession {
-  id            String   @id @default(cuid())
-  tenantId      String
-  userId        String
-  discordUserId String   @db.VarChar(64)
-  sessionToken  String   @unique @db.VarChar(512)
-  expiresAt     DateTime
-  createdAt     DateTime @default(now())
-
-  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([tenantId])
-  @@index([userId])
-  @@index([sessionToken])
-  @@map("discord_sessions")
-}
-
-model AuditEvent {
-  id         String   @id @default(cuid())
-  tenantId   String
-  actorId    String   @db.VarChar(100)
-  actorType  String   @db.VarChar(20)
-  event      String   @db.VarChar(100)
-  details    Json     @default("{}")
-  ipAddress  String?  @db.VarChar(45)
-  createdAt  DateTime @default(now())
-
-  tenant     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-
-  @@index([tenantId])
-  @@index([tenantId, createdAt])
-  @@map("audit_events")
-}
-
-model EnrollmentCode {
-  id             String    @id @default(cuid())
-  tenantId       String
-  createdById    String
-  code           String    @unique @db.VarChar(32)
-  expiresAt      DateTime
-  usedAt         DateTime?
-  usedByDeviceId String?   @db.VarChar(128)
-  isRevoked      Boolean   @default(false)
-  createdAt      DateTime  @default(now())
-
-  tenant         Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  createdBy      User      @relation(fields: [createdById], references: [id], onDelete: Cascade)
-
-  @@index([tenantId])
-  @@index([code])
-  @@map("enrollment_codes")
-}
-
-model NonceCache {
-  id         String   @id @default(cuid())
-  deviceId   String   @db.VarChar(128)
-  nonce      String   @db.VarChar(128)
-  expiresAt  DateTime
-
-  @@unique([deviceId, nonce])
-  @@index([expiresAt])
-  @@map("nonce_caches")
-}
+    id: str = Field(default=None, primary_key=True)
+    device_id: str = Field(sa_column=Column(String(128), nullable=False, index=True))
+    nonce: str = Field(sa_column=Column(String(128), nullable=False))
+    expires_at: datetime = Field(nullable=False, index=True)
 ```
+
 
 ---
 
