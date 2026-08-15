@@ -328,7 +328,7 @@ NETRA explicitly handles 10 real-world concurrency scenarios and system restart 
 - **Handling**: Agent detects WSS closure, initiates exponential backoff reconnect (1s, 2s, 4s, 8s... max 60s) with jitter. During WSS outage, Agent polls fallback REST endpoint `GET /api/v1/agent/tasks` every 15s. Upon WSS reconnect, Agent signs WSS handshake with Ed25519 private key and resumes real-time stream.
 
 ### 7.8 Scenario 8: Backend Service Restart & Task Recovery
-- **Behavior**: `netra-backend` container restarts while tasks are in `QUEUED` or `DELIVERED` state.
+- **Behavior**: `backend/` service container restarts while tasks are in `QUEUED` or `DELIVERED` state.
 - **Handling**: State machine recovery job executes on Backend startup. Tasks stuck in `DELIVERED` without an ACK past lease expiration (30s) are reset to `QUEUED`. Connected agents automatically reconnect WSS streams and re-fetch pending tasks.
 
 ### 7.9 Scenario 9: Discord Bot Service Restart
