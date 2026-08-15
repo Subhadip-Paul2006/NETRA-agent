@@ -2,16 +2,15 @@
 
 import time
 from datetime import UTC, datetime, timedelta
-from typing import Dict, Optional
 
-from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from netra_backend.database import get_db_session, get_session_factory
+from netra_backend.database import get_session_factory
 from netra_backend.logging import get_logger
-from netra_backend.models import Device, DeviceCredential, DeviceCredentialStatus, NonceCache
+from netra_backend.models import Device, DeviceCredential, NonceCache
 from netra_shared.crypto import construct_canonical_payload, verify_ed25519_signature
+from netra_shared.enums import DeviceCredentialStatus
 
 logger = get_logger(__name__)
 
@@ -22,7 +21,7 @@ class ConnectionManager:
     """Manages active Agent WSS Gateway persistent connections."""
 
     def __init__(self) -> None:
-        self.active_connections: Dict[str, WebSocket] = {}
+        self.active_connections: dict[str, WebSocket] = {}
 
     async def connect(self, device_id: str, websocket: WebSocket) -> None:
         """Register active device WebSocket connection."""
@@ -62,7 +61,9 @@ async def agent_wss_gateway(websocket: WebSocket) -> None:
 
     if not all([device_id, timestamp_str, nonce, request_id, signature]):
         logger.warning("wss_handshake_missing_headers", device_id=device_id)
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Missing Ed25519 security headers")
+        await websocket.close(
+            code=status.WS_1008_POLICY_VIOLATION, reason="Missing Ed25519 security headers"
+        )
         return
 
     assert timestamp_str is not None
@@ -77,10 +78,14 @@ async def agent_wss_gateway(websocket: WebSocket) -> None:
         now_timestamp = time.time()
         if abs(now_timestamp - req_timestamp) > 300:
             logger.warning("wss_handshake_expired_timestamp", device_id=device_id)
-            await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Expired timestamp window")
+            await websocket.close(
+                code=status.WS_1008_POLICY_VIOLATION, reason="Expired timestamp window"
+            )
             return
     except ValueError:
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Invalid timestamp format")
+        await websocket.close(
+            code=status.WS_1008_POLICY_VIOLATION, reason="Invalid timestamp format"
+        )
         return
 
     session_factory = get_session_factory()
@@ -100,7 +105,9 @@ async def agent_wss_gateway(websocket: WebSocket) -> None:
 
         if not row:
             logger.warning("wss_handshake_device_not_found", device_id=device_id)
-            await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Device unauthenticated or revoked")
+            await websocket.close(
+                code=status.WS_1008_POLICY_VIOLATION, reason="Device unauthenticated or revoked"
+            )
             return
 
         device, public_key_hex = row
@@ -113,7 +120,10 @@ async def agent_wss_gateway(websocket: WebSocket) -> None:
         nonce_result = await db.execute(nonce_stmt)
         if nonce_result.scalar_one_or_none():
             logger.warning("wss_handshake_replay_nonce_detected", device_id=device_id, nonce=nonce)
-            await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Replay attack detected (duplicate nonce)")
+            await websocket.close(
+                code=status.WS_1008_POLICY_VIOLATION,
+                reason="Replay attack detected (duplicate nonce)",
+            )
             return
 
         # 4. Verify Ed25519 Signature against Canonical Payload
@@ -128,7 +138,9 @@ async def agent_wss_gateway(websocket: WebSocket) -> None:
 
         if not verify_ed25519_signature(public_key_hex, signature, canonical_payload):
             logger.warning("wss_handshake_invalid_signature", device_id=device_id)
-            await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Invalid Ed25519 signature")
+            await websocket.close(
+                code=status.WS_1008_POLICY_VIOLATION, reason="Invalid Ed25519 signature"
+            )
             return
 
         # Record nonce in NonceCache (durable database replay protection)
@@ -147,12 +159,14 @@ async def agent_wss_gateway(websocket: WebSocket) -> None:
     await manager.connect(device_id, websocket)
 
     try:
-        await websocket.send_json({
-            "type": "connected",
-            "device_id": device_id,
-            "tenant_id": device.tenant_id,
-            "timestamp": datetime.now(UTC).isoformat(),
-        })
+        await websocket.send_json(
+            {
+                "type": "connected",
+                "device_id": device_id,
+                "tenant_id": device.tenant_id,
+                "timestamp": datetime.now(UTC).isoformat(),
+            }
+        )
 
         # Main WSS Message Loop
         while True:
@@ -160,10 +174,12 @@ async def agent_wss_gateway(websocket: WebSocket) -> None:
             msg_type = data.get("type")
 
             if msg_type == "ping":
-                await websocket.send_json({
-                    "type": "pong",
-                    "timestamp": datetime.now(UTC).isoformat(),
-                })
+                await websocket.send_json(
+                    {
+                        "type": "pong",
+                        "timestamp": datetime.now(UTC).isoformat(),
+                    }
+                )
             else:
                 logger.info("wss_message_received", device_id=device_id, msg_type=msg_type)
 
