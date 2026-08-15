@@ -9,7 +9,7 @@
 - **Headers**:
   - `X-Request-ID`: Unique tracking ID per payload
   - `X-Idempotency-Key`: `task_id:execution_id` for retry safety
-  - `X-NETRA-Signature`: HMAC SHA-256 signature
+  - `X-NETRA-Signature`: Ed25519 cryptographic signature (hex or base64 encoded)
 
 ---
 
@@ -21,12 +21,12 @@
   - `X-NETRA-Device-ID: dev_9a8b7c6d5e4f`
   - `X-NETRA-Timestamp: 1776189500`
   - `X-NETRA-Nonce: non_12345678`
-  - `X-NETRA-Signature: <HMAC>`
+  - `X-NETRA-Signature: <Ed25519_Signature>`
 - **Behavior**: Persistent outbound WSS stream. Backend pushes `TASK_DISPATCH` events in real time. Agent responds with `TASK_ACK` and `TASK_RESULT` events over WSS frame.
 
 ### 2.2 Fallback Channel: HTTPS REST Polling
 - **Endpoint**: `GET /api/v1/agent/tasks` (Polled every 15s when WSS disconnected)
-- **Auth**: HMAC SHA-256 Headers
+- **Auth**: Ed25519 Signature Headers
 
 ---
 
@@ -40,7 +40,8 @@
     "hostname": "workstation-01",
     "os": "windows",
     "architecture": "x86_64",
-    "agent_version": "1.0.0"
+    "agent_version": "1.0.0",
+    "public_key": "MCowBQYDK2VwAyEA7f8a9b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c="
   }
   ```
 - **Response `201 Created`**:
@@ -49,8 +50,8 @@
     "success": true,
     "data": {
       "device_id": "dev_9a8b7c6d5e4f",
-      "device_secret": "sec_3f2e1d0c9b8a7f6e5d4c3b2a1f0e9d8c7b6a5f4e",
-      "tenant_slug": "acme-corp"
+      "tenant_slug": "acme-corp",
+      "registered_at": "2026-08-14T22:10:00.000Z"
     }
   }
   ```
@@ -74,7 +75,7 @@
 - **Response `201 Created`**: `{"success": true, "data": {"task_id": "task_11223344", "status": "QUEUED"}}`
 
 ### 3.4 `POST /api/v1/agent/tasks/:id/results` (Submit Execution Results)
-- **Auth**: HMAC SHA-256 Headers + `X-Idempotency-Key: task_11223344:exec_998877`.
+- **Auth**: Ed25519 Signature Headers + `X-Idempotency-Key: task_11223344:exec_998877`.
 - **Request Body**:
   ```json
   {
@@ -94,3 +95,4 @@
   }
   ```
 - **Response `200 OK`**: `{"success": true, "data": {"acknowledged": true}}`
+
