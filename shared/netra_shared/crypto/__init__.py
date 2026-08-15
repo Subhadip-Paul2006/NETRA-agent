@@ -55,9 +55,12 @@ def construct_canonical_payload(
     return canonical_str.encode("utf-8")
 
 
-def sign_payload(private_key_bytes: bytes, payload: bytes) -> bytes:
-    """Sign a byte payload with an Ed25519 private key."""
-    private_key = ed25519.Ed25519PrivateKey.from_private_bytes(private_key_bytes)
+def sign_payload(private_key_input: ed25519.Ed25519PrivateKey | bytes, payload: bytes) -> bytes:
+    """Sign a byte payload with an Ed25519 private key or key bytes."""
+    if isinstance(private_key_input, bytes):
+        private_key = ed25519.Ed25519PrivateKey.from_private_bytes(private_key_input)
+    else:
+        private_key = private_key_input
     return private_key.sign(payload)
 
 
