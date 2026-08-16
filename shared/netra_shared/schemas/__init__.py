@@ -5,7 +5,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from netra_shared.enums import FindingStatus, Role, Severity, TaskStatus
+from netra_shared.enums import Role, TaskStatus
 
 
 class ErrorEnvelopeSchema(BaseModel):
@@ -85,17 +85,46 @@ class TaskSchema(BaseModel):
     updated_at: datetime
 
 
-class FindingSchema(BaseModel):
-    """Vulnerability finding domain schema."""
+from netra_shared.schemas.finding import (
+    FindingDetailSchema,
+    FindingEvidenceSchema,
+    FindingPaginatedResponse,
+    FindingSchema,
+    FindingStatusUpdateRequest,
+)
+from netra_shared.schemas.task import (
+    CapabilityEnum,
+    FindingItem,
+    TaskAckRequest,
+    TaskCancelResponse,
+    TaskCreateRequest,
+    TaskPriorityEnum,
+    TaskResponse,
+    TaskResultRequest,
+    TaskStartRequest,
+    TaskStatusEnum,
+)
 
-    model_config = ConfigDict(from_attributes=True)
-
-    id: str
-    tenant_id: str
-    title: str
-    category: str
-    severity: Severity
-    status: FindingStatus
-    fingerprint: str
-    first_seen_at: datetime
-    last_seen_at: datetime
+__all__ = [
+    "CapabilityEnum",
+    "DeviceSchema",
+    "ErrorEnvelopeSchema",
+    "FindingDetailSchema",
+    "FindingEvidenceSchema",
+    "FindingItem",
+    "FindingPaginatedResponse",
+    "FindingSchema",
+    "FindingStatusUpdateRequest",
+    "TaskAckRequest",
+    "TaskCancelResponse",
+    "TaskCreateRequest",
+    "TaskPriorityEnum",
+    "TaskResponse",
+    "TaskResultRequest",
+    "TaskSchema",
+    "TaskStartRequest",
+    "TaskStatusEnum",
+    "TenantMembershipSchema",
+    "TenantSchema",
+    "UserSchema",
+]
