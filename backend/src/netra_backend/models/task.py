@@ -10,6 +10,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from netra_backend.models.base import Base
 from netra_backend.models.identity import generate_uuid
 from netra_shared.enums import TaskStatus
+from netra_shared.schemas.task import TaskPriorityEnum
 
 
 class Task(Base):
@@ -24,12 +25,24 @@ class Task(Base):
     device_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("devices.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    created_by_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, default=None
+    )
     capability: Mapped[str] = mapped_column(String(100), nullable=False)
     parameters: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     status: Mapped[TaskStatus] = mapped_column(
-        SQLEnum(TaskStatus), default=TaskStatus.CREATED, nullable=False
+        SQLEnum(TaskStatus), default=TaskStatus.CREATED, nullable=False, index=True
+    )
+    priority: Mapped[TaskPriorityEnum] = mapped_column(
+        SQLEnum(TaskPriorityEnum), default=TaskPriorityEnum.NORMAL, nullable=False
     )
     created_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(UTC), nullable=False)
+    queued_at: Mapped[datetime | None] = mapped_column(nullable=True, default=None)
+    delivered_at: Mapped[datetime | None] = mapped_column(nullable=True, default=None)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(nullable=True, default=None)
+    started_at: Mapped[datetime | None] = mapped_column(nullable=True, default=None)
+    completed_at: Mapped[datetime | None] = mapped_column(nullable=True, default=None)
+    expires_at: Mapped[datetime | None] = mapped_column(nullable=True, default=None)
     updated_at: Mapped[datetime] = mapped_column(
         default=lambda: datetime.now(UTC),
         onupdate=lambda: datetime.now(UTC),
