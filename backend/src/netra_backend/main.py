@@ -14,7 +14,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from netra_backend.api.v1.agent_tasks import router as agent_tasks_router
 from netra_backend.api.v1.auth import router as auth_router
 from netra_backend.api.v1.devices import router as devices_router
+from netra_backend.api.v1.findings import router as findings_router
 from netra_backend.api.v1.health import router as health_router
+from netra_backend.api.v1.tasks import router as tasks_router
 from netra_backend.api.v1.wss import router as wss_router
 from netra_backend.config import Settings, get_settings
 from netra_backend.logging import get_logger, setup_logging
@@ -87,6 +89,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(auth_router, prefix=f"{settings.api_prefix}/auth")
     app.include_router(devices_router, prefix=settings.api_prefix)
     app.include_router(agent_tasks_router, prefix=settings.api_prefix)
+    app.include_router(tasks_router, prefix=settings.api_prefix)
+    app.include_router(findings_router, prefix=settings.api_prefix)
     app.include_router(wss_router, prefix=settings.api_prefix)
 
     return app
