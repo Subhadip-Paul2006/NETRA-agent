@@ -103,8 +103,9 @@
 
 ---
 
-## Phase 5: Task Queue Engine & State Machine (`backend/`)
-- **Goal**: Implement Task Queue Engine (`CREATED` $\rightarrow$ `QUEUED` $\rightarrow$ `DELIVERED` $\rightarrow$ `ACKNOWLEDGED` $\rightarrow$ `RUNNING` $\rightarrow$ `COMPLETED`), idempotency check, and lease timeouts.
+## Phase 5: Task Queue Engine & State Machine (`backend/`) — [COMPLETED]
+- **Status**: **COMPLETED & FULLY VERIFIED**
+- **Goal**: Implement Task Queue Engine (`CREATED` $\rightarrow$ `QUEUED` $\rightarrow$ `DELIVERED` $\rightarrow$ `ACKNOWLEDGED` $\rightarrow$ `RUNNING` $\rightarrow$ `COMPLETED`), idempotency check, and atomic task claiming.
 - **INFRASTRUCTURE REQUIREMENT**: PostgreSQL `TaskExecution` and `NonceCache` tables provide durable idempotency and nonce persistence. Redis is OPTIONAL and deferred for future high-scale performance phases.
 - **Target Repository Component**: **`backend/`** (Python 3.11+ / FastAPI / SQLAlchemy 2.0)
 - **Files/Components**:
@@ -124,8 +125,9 @@
 
 ---
 
-## Phase 6: Controlled Security Capabilities Suite (`agent/`)
-- **Goal**: Implement pre-compiled Python scanner modules for all 7 controlled capabilities (`SCAN_NETWORK`, `SCAN_PROCESSES`, `SCAN_CONNECTIONS`, `SCAN_FIREWALL`, `SCAN_USERS`, `SCAN_STARTUP`, `SCAN_FILE_INTEGRITY`).
+## Phase 6: Controlled Security Capabilities Suite (`agent/`) — [COMPLETED]
+- **Status**: **COMPLETED & FULLY VERIFIED**
+- **Goal**: Implement 7 defensive capability scanners (`SCAN_NETWORK`, `SCAN_PROCESSES`, `SCAN_CONNECTIONS`, `SCAN_FIREWALL`, `SCAN_USERS`, `SCAN_STARTUP`, `SCAN_FILE_INTEGRITY`), capability registry, safety boundaries, and task executor integration.
 - **Target Repository Component**: **`agent/`** (Python 3.11+ / Typer / psutil / pydantic / cryptography)
 - **Files/Components**:
   - `agent/netra/modules/base.py` (Base scanner module class with CPU/RAM resource caps)
