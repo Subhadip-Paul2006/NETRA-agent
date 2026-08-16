@@ -40,6 +40,7 @@ class FindingStatus(str, Enum):
     """Vulnerability finding lifecycle status."""
 
     OPEN = "OPEN"
+    ACKNOWLEDGED = "ACKNOWLEDGED"
     RESOLVED = "RESOLVED"
     REOPENED = "REOPENED"
     MUTED = "MUTED"
