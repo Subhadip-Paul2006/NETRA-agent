@@ -1,9 +1,9 @@
-"""SQLAlchemy 2.x Finding and FindingEvidence Models."""
+"""SQLAlchemy 2.x Finding and FindingEvidence Models for NETRA."""
 
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import JSON, ForeignKey, String, UniqueConstraint
+from sqlalchemy import JSON, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy import Enum as SQLEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -24,22 +24,38 @@ class Finding(Base):
     tenant_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    device_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("devices.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    task_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    execution_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    capability: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
-    category: Mapped[str] = mapped_column(String(100), nullable=False)
-    severity: Mapped[Severity] = mapped_column(SQLEnum(Severity), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    category: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    severity: Mapped[Severity] = mapped_column(SQLEnum(Severity), nullable=False, index=True)
     status: Mapped[FindingStatus] = mapped_column(
-        SQLEnum(FindingStatus), default=FindingStatus.OPEN, nullable=False
+        SQLEnum(FindingStatus), default=FindingStatus.OPEN, nullable=False, index=True
     )
     fingerprint: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    remediation: Mapped[str | None] = mapped_column(Text, nullable=True)
     first_seen_at: Mapped[datetime] = mapped_column(
         default=lambda: datetime.now(UTC), nullable=False
     )
     last_seen_at: Mapped[datetime] = mapped_column(
         default=lambda: datetime.now(UTC), nullable=False
     )
+    created_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(UTC), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC), nullable=False
+    )
 
     evidences: Mapped[list["FindingEvidence"]] = relationship(
-        back_populates="finding", cascade="all, delete-orphan"
+        back_populates="finding",
+        cascade="all, delete-orphan",
+        order_by="FindingEvidence.observed_at.desc()",
     )
 
 
