@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from netra_backend.database import get_db_session
 from netra_backend.logging import get_logger
 from netra_backend.models import Device, DeviceCredential, NonceCache
+from netra_backend.services.task_engine import claim_next_task_for_device
 from netra_shared.crypto import construct_canonical_payload, verify_ed25519_signature
 from netra_shared.enums import DeviceCredentialStatus
 
@@ -27,6 +28,7 @@ class AgentTaskItem(BaseModel):
     capability: str
     parameters: dict
     created_at: str
+    execution_id: str | None = None
 
 
 class AgentTasksResponse(BaseModel):
@@ -125,5 +127,22 @@ async def poll_agent_tasks(
 
     logger.info("agent_tasks_polled", device_id=x_netra_device_id)
 
-    # Phase 4 returns empty pending tasks array (Task Queue Engine implemented in Phase 5)
-    return AgentTasksResponse(success=True, tasks=[])
+    # Claim next queued task for device
+    claimed_task, execution_id = await claim_next_task_for_device(
+        db, device.tenant_id, device.id, request_id=x_netra_request_id
+    )
+
+    tasks_list: list[AgentTaskItem] = []
+    if claimed_task:
+        tasks_list.append(
+            AgentTaskItem(
+                id=claimed_task.id,
+                tenant_id=claimed_task.tenant_id,
+                capability=claimed_task.capability,
+                parameters=claimed_task.parameters,
+                created_at=claimed_task.created_at.isoformat(),
+                execution_id=execution_id,
+            )
+        )
+
+    return AgentTasksResponse(success=True, tasks=tasks_list)
