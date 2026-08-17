@@ -1,12 +1,15 @@
 """Concurrency and RLS Integration Test Suite for Security Finding Deduplication and Lifecycle."""
 
 import asyncio
+import hashlib
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from netra_backend.database import get_session_factory
-from netra_backend.models import Device, Finding, FindingEvidence, Tenant, User
+from netra_backend.models import Device, Finding, TaskExecution, Tenant, User
 from netra_backend.security import hash_password
 from netra_backend.services.finding_engine import process_finding_ingestion
 from netra_backend.services.task_engine import create_task, submit_task_result
@@ -15,7 +18,7 @@ from netra_shared.schemas.task import CapabilityEnum, FindingItem, TaskPriorityE
 
 
 @pytest.mark.asyncio
-async def test_concurrent_result_submissions_deduplicate_to_single_finding(app) -> None:
+async def test_concurrent_result_submissions_deduplicate_to_single_finding(client) -> None:
     """Verify 5 concurrent result submissions produce exactly 1 logical finding master entity."""
     session_factory = get_session_factory()
 
@@ -55,17 +58,30 @@ async def test_concurrent_result_submissions_deduplicate_to_single_finding(app) 
                 parameters={},
                 priority=TaskPriorityEnum.NORMAL,
             )
-            # Mark task running
+            # Mark task running and create corresponding TaskExecution record
             task.status = TaskStatus.RUNNING
+            exec_id = f"exec_conc_{i}_{task.id[:8]}"
+            execution = TaskExecution(
+                task_id=task.id,
+                tenant_id=t_id,
+                execution_id=exec_id,
+                request_id=f"req_{exec_id}",
+                status=TaskStatus.RUNNING,
+                started_at=datetime.now(UTC),
+            )
+            db.add(execution)
             await db.commit()
             task_ids.append(task.id)
-            exec_ids.append(f"exec_conc_{i}_{task.id[:8]}")
+            exec_ids.append(exec_id)
 
+    import hashlib
+
+    fp_hash_1 = hashlib.sha256(b"fp_concurrent_test_port_8080_001").hexdigest()
     finding_item = FindingItem(
         title="Open Port 8080",
         category="NETWORK",
         severity="HIGH",
-        fingerprint="fp_concurrent_test_port_8080_001",
+        fingerprint=fp_hash_1,
         details={"port": 8080, "service": "http-alt"},
     )
 
@@ -87,8 +103,10 @@ async def test_concurrent_result_submissions_deduplicate_to_single_finding(app) 
 
     # Verify findings table has EXACTLY 1 finding entry for this fingerprint
     async with session_factory() as db:
-        stmt = select(Finding).where(
-            Finding.tenant_id == t_id, Finding.fingerprint == finding_item.fingerprint
+        stmt = (
+            select(Finding)
+            .options(selectinload(Finding.evidences))
+            .where(Finding.tenant_id == t_id, Finding.fingerprint == finding_item.fingerprint)
         )
         res = await db.execute(stmt)
         findings = res.scalars().all()
@@ -96,16 +114,11 @@ async def test_concurrent_result_submissions_deduplicate_to_single_finding(app) 
         finding = findings[0]
         assert finding.title == "Open Port 8080"
         assert finding.status == FindingStatus.OPEN
-
-        # Verify 5 evidence records exist under the single finding
-        ev_stmt = select(FindingEvidence).where(FindingEvidence.finding_id == finding.id)
-        ev_res = await db.execute(ev_stmt)
-        evidences = ev_res.scalars().all()
-        assert len(evidences) == 5
+        assert len(finding.evidences) == 5
 
 
 @pytest.mark.asyncio
-async def test_resolved_finding_reopens_upon_reappearance(app) -> None:
+async def test_resolved_finding_reopens_upon_reappearance(client) -> None:
     """Verify an identical finding marked RESOLVED transitions to REOPENED when re-detected."""
     session_factory = get_session_factory()
 
@@ -137,17 +150,35 @@ async def test_resolved_finding_reopens_upon_reappearance(app) -> None:
             priority=TaskPriorityEnum.NORMAL,
         )
         task.status = TaskStatus.RUNNING
+        ex1 = TaskExecution(
+            task_id=task.id,
+            tenant_id=tenant.id,
+            execution_id="exec_1",
+            request_id="req_exec_1",
+            status=TaskStatus.RUNNING,
+            started_at=datetime.now(UTC),
+        )
+        ex2 = TaskExecution(
+            task_id=task.id,
+            tenant_id=tenant.id,
+            execution_id="exec_2",
+            request_id="req_exec_2",
+            status=TaskStatus.RUNNING,
+            started_at=datetime.now(UTC),
+        )
+        db.add_all([ex1, ex2])
         await db.commit()
 
         t_id = tenant.id
         d_id = device.id
         task_id = task.id
 
+    fp_hash_2 = hashlib.sha256(b"fp_malware_process_reopen_01").hexdigest()
     finding_item = FindingItem(
         title="Suspicious Malware Process",
         category="PROCESS",
         severity="CRITICAL",
-        fingerprint="fp_malware_process_reopen_01",
+        fingerprint=fp_hash_2,
         details={"pid": 1337, "name": "xmrig"},
     )
 
