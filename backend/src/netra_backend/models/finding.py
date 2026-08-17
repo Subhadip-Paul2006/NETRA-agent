@@ -54,7 +54,7 @@ class Finding(Base):
 
     evidences: Mapped[list["FindingEvidence"]] = relationship(
         back_populates="finding",
-        cascade="all, delete-orphan",
+        cascade="save-update, merge",
         order_by="FindingEvidence.observed_at.desc()",
     )
 

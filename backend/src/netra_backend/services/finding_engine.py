@@ -4,6 +4,7 @@ Implements deterministic SHA-256 finding fingerprinting, automated deduplication
 evidence ingestion, lifecycle state machine, and multi-tenant RLS query isolation.
 """
 
+import asyncio
 import hashlib
 import json
 from datetime import UTC, datetime
@@ -27,6 +28,21 @@ from netra_shared.schemas.task import FindingItem
 
 logger = get_logger(__name__)
 
+_fingerprint_locks: dict[tuple[int, str, str], asyncio.Lock] = {}
+
+
+async def _get_fingerprint_lock(tenant_id: str, fingerprint: str) -> asyncio.Lock:
+    try:
+        loop_id = id(asyncio.get_running_loop())
+    except RuntimeError:
+        loop_id = 0
+    key = (loop_id, tenant_id, fingerprint)
+    if key not in _fingerprint_locks:
+        _fingerprint_locks[key] = asyncio.Lock()
+    return _fingerprint_locks[key]
+
+
+# Maximum evidence payload size per item (1 MB)
 MAX_EVIDENCE_SIZE_BYTES = 1024 * 1024  # 1MB per evidence detail payload
 
 
@@ -141,71 +157,104 @@ async def process_finding_ingestion(
                     resource_key=resource_key,
                 )
 
-            try:
-                sev = Severity[item.severity.upper()]
-            except KeyError:
-                sev = Severity.MEDIUM
+            lock = await _get_fingerprint_lock(tenant_id, fingerprint)
+            async with lock:
+                db.expire_all()
+                try:
+                    sev = Severity[item.severity.upper()]
+                except KeyError:
+                    sev = Severity.MEDIUM
 
-            # Lookup existing finding in tenant context
-            stmt = select(Finding).where(
-                Finding.tenant_id == tenant_id, Finding.fingerprint == fingerprint
-            )
-            res = await db.execute(stmt)
-            finding = res.scalar_one_or_none()
-
-            if finding:
-                # Update existing finding timestamps and execution metadata
-                finding.last_seen_at = now
-                finding.updated_at = now
-                finding.device_id = device_id
-                finding.task_id = task_id
-                finding.execution_id = execution_id
-                finding.capability = capability
-
-                # Reopen finding if previously resolved
-                if finding.status == FindingStatus.RESOLVED:
-                    finding.status = FindingStatus.REOPENED
-                    logger.info(
-                        "finding_reopened",
-                        finding_id=finding.id,
-                        tenant_id=tenant_id,
-                        fingerprint=fingerprint,
+                finding = None
+                for attempt in range(10):
+                    db.expire_all()
+                    stmt = select(Finding).where(
+                        Finding.tenant_id == tenant_id, Finding.fingerprint == fingerprint
                     )
-            else:
-                # Create master finding entry
-                finding = Finding(
+                    res = await db.execute(stmt)
+                    finding = res.scalar_one_or_none()
+
+                    if finding:
+                        break
+
+                    new_finding = Finding(
+                        tenant_id=tenant_id,
+                        device_id=device_id,
+                        task_id=task_id,
+                        execution_id=execution_id,
+                        capability=capability,
+                        title=item.title,
+                        description=str(item.details.get("description", item.title)),
+                        category=item.category,
+                        severity=sev,
+                        status=FindingStatus.OPEN,
+                        fingerprint=fingerprint,
+                        remediation=item.details.get("remediation"),
+                        first_seen_at=now,
+                        last_seen_at=now,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    try:
+                        async with db.begin_nested():
+                            db.add(new_finding)
+                            await db.flush()
+                        finding = new_finding
+                        break
+                    except Exception as e:
+                        logger.warning("savepoint_collision", attempt=attempt, error=str(e))
+                        if attempt < 9:
+                            await asyncio.sleep(0.05 * (attempt + 1))
+                            continue
+
+                if not finding:
+                    stmt = select(Finding).where(
+                        Finding.tenant_id == tenant_id, Finding.fingerprint == fingerprint
+                    )
+                    res = await db.execute(stmt)
+                    finding = res.scalar_one_or_none()
+
+                if finding:
+                    # Update existing finding timestamps and execution metadata
+                    finding.last_seen_at = now
+                    finding.updated_at = now
+                    finding.device_id = device_id
+                    finding.task_id = task_id
+                    finding.execution_id = execution_id
+                    finding.capability = capability
+
+                    # Reopen finding if previously resolved
+                    if finding.status == FindingStatus.RESOLVED:
+                        finding.status = FindingStatus.REOPENED
+                        logger.info(
+                            "finding_reopened",
+                            finding_id=finding.id,
+                            tenant_id=tenant_id,
+                            fingerprint=fingerprint,
+                        )
+
+                if not finding:
+                    continue
+
+                # Attach evidence history item
+                evidence = FindingEvidence(
                     tenant_id=tenant_id,
+                    finding_id=finding.id,
                     device_id=device_id,
                     task_id=task_id,
                     execution_id=execution_id,
-                    capability=capability,
-                    title=item.title,
-                    description=str(item.details.get("description", item.title)),
-                    category=item.category,
-                    severity=sev,
-                    status=FindingStatus.OPEN,
-                    fingerprint=fingerprint,
-                    remediation=item.details.get("remediation"),
-                    first_seen_at=now,
-                    last_seen_at=now,
-                    created_at=now,
-                    updated_at=now,
+                    details=item.details,
+                    observed_at=now,
                 )
-                db.add(finding)
-                await db.flush()
-
-            # Attach evidence history item
-            evidence = FindingEvidence(
-                tenant_id=tenant_id,
-                finding_id=finding.id,
-                device_id=device_id,
-                task_id=task_id,
-                execution_id=execution_id,
-                details=item.details,
-                observed_at=now,
-            )
-            db.add(evidence)
-            processed_findings.append(finding)
+                db.add(evidence)
+                await db.commit()
+                logger.info(
+                    "evidence_added",
+                    finding_id=finding.id,
+                    execution_id=execution_id,
+                    task_id=task_id,
+                )
+                processed_findings.append(finding)
 
     return processed_findings
 

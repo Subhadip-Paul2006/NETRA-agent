@@ -27,7 +27,14 @@ logger = get_logger(__name__)
 # Explicit Allowed State Transitions
 ALLOWED_TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
     TaskStatus.CREATED: {TaskStatus.QUEUED, TaskStatus.CANCELLED},
-    TaskStatus.QUEUED: {TaskStatus.DELIVERED, TaskStatus.EXPIRED, TaskStatus.CANCELLED},
+    TaskStatus.QUEUED: {
+        TaskStatus.DELIVERED,
+        TaskStatus.RUNNING,
+        TaskStatus.COMPLETED,
+        TaskStatus.FAILED,
+        TaskStatus.EXPIRED,
+        TaskStatus.CANCELLED,
+    },
     TaskStatus.DELIVERED: {
         TaskStatus.ACKNOWLEDGED,
         TaskStatus.RUNNING,
@@ -364,6 +371,8 @@ async def submit_task_result(
         now = datetime.now(UTC)
         task.status = result_status
         task.completed_at = now
+        db.add(task)
+        await db.flush()
 
         exec_stmt = select(TaskExecution).where(
             TaskExecution.task_id == task_id, TaskExecution.execution_id == execution_id
@@ -374,6 +383,34 @@ async def submit_task_result(
             execution.status = result_status
             execution.completed_at = now
             execution.error_message = error_message
+        else:
+            execution = TaskExecution(
+                task_id=task_id,
+                tenant_id=tenant_id,
+                execution_id=execution_id,
+                request_id=f"req_{execution_id}",
+                status=result_status,
+                started_at=now,
+                completed_at=now,
+                error_message=error_message,
+            )
+        task_capability = task.capability
+        target_task_id = task.id
+
+        event_name = "TASK_COMPLETED" if result_status == TaskStatus.COMPLETED else "TASK_FAILED"
+        audit = AuditEvent(
+            tenant_id=tenant_id,
+            actor_id=device_id,
+            actor_type="AGENT",
+            event=event_name,
+            details={
+                "task_id": target_task_id,
+                "execution_id": execution_id,
+                "findings_count": len(findings),
+                "error": error_message,
+            },
+        )
+        db.add(audit)
 
         # Process findings if completed successfully
         if result_status == TaskStatus.COMPLETED and findings:
@@ -385,29 +422,17 @@ async def submit_task_result(
                 device_id=device_id,
                 task_id=task_id,
                 execution_id=execution_id,
-                capability=task.capability,
+                capability=task_capability,
                 raw_findings=findings,
             )
+        else:
+            await db.commit()
 
-        event_name = "TASK_COMPLETED" if result_status == TaskStatus.COMPLETED else "TASK_FAILED"
-        audit = AuditEvent(
-            tenant_id=tenant_id,
-            actor_id=device_id,
-            actor_type="AGENT",
-            event=event_name,
-            details={
-                "task_id": task.id,
-                "execution_id": execution_id,
-                "findings_count": len(findings),
-                "error": error_message,
-            },
-        )
-        db.add(audit)
-        await db.commit()
+        await db.refresh(task)
 
         logger.info(
             "task_result_submitted",
-            task_id=task.id,
+            task_id=target_task_id,
             tenant_id=tenant_id,
             device_id=device_id,
             status=result_status.value,

@@ -27,10 +27,19 @@ def get_engine() -> AsyncEngine:
 
     from typing import Any
 
+    from sqlalchemy.pool import StaticPool
+
     is_sqlite = url.startswith("sqlite")
     engine_kwargs: dict[str, Any] = {"echo": settings.log_level == "DEBUG"}
 
-    if not is_sqlite:
+    if is_sqlite:
+        # SQLite in-memory databases are per-connection by default; a StaticPool makes
+        # every session share one connection (and therefore one database), which is
+        # required for concurrency tests and cross-session consistency.
+        if ":memory:" in url:
+            engine_kwargs["poolclass"] = StaticPool
+            engine_kwargs["connect_args"] = {"check_same_thread": False, "timeout": 30}
+    else:
         engine_kwargs["pool_size"] = settings.database_pool_min
         engine_kwargs["max_overflow"] = settings.database_pool_max - settings.database_pool_min
 

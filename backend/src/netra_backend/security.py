@@ -32,10 +32,10 @@ def hash_token(raw_token: str) -> str:
     return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
 
 
-def create_access_token(user_id: str, tenant_id: str | None = None) -> str:
+def create_access_token(user_id: str, tenant_id: str | None = None, role: str | None = None) -> str:
     """Create a signed JWT access token.
 
-    Claims: sub, tenant_id, type="access", iat, exp, jti, iss, aud.
+    Claims: sub, tenant_id, role, type="access", iat, exp, jti, iss, aud.
     """
     settings = get_settings()
     now = datetime.now(UTC)
@@ -52,6 +52,8 @@ def create_access_token(user_id: str, tenant_id: str | None = None) -> str:
     }
     if tenant_id:
         payload["tenant_id"] = tenant_id
+    if role:
+        payload["role"] = role
 
     secret = settings.jwt_secret
     if not secret:
