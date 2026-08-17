@@ -151,25 +151,24 @@
 
 ---
 
-## Phase 7: Discord Control Plane & Async DM Delivery (`discord/`)
-- **Goal**: Initialize `discord/` bot, implement Slash Commands (`/panel`, `/scan`, `/devices`, `/findings`), ephemeral slash command acks (`ephemeral: true`), and Direct Message (DM) result delivery.
-- **Target Repository Component**: **`discord/`** (Python 3.11+ / discord.py / httpx)
+## Phase 7: Security Findings, Evidence & Assessment Intelligence (`backend/`, `agent/`, `shared/`)
+- **Goal**: Implement canonical security findings master engine, observation evidence attachment, fingerprint deduplication with savepoint retry & loop-scoped locking, RLS tenant isolation, evidence payload size caps (1MB), and REST finding control-plane endpoints.
+- **Target Repository Components**: **`backend/`**, **`agent/`**, **`shared/`** (Python 3.11+ / FastAPI / SQLAlchemy 2.0 / PostgreSQL RLS / Pytest)
 - **Files/Components**:
-  - `discord/bot/main.py` (discord.py bot runner)
-  - `discord/bot/cogs/` (Slash command routers: `scan.py`, `panel.py`, `devices.py`, `findings.py`)
-  - `discord/bot/services/backend_client.py` (HTTP client for `backend/` REST API)
-  - `discord/bot/services/dm_delivery.py` (Asynchronous event listener for `TASK_RESULT_DELIVERY` and `SECURITY_ALERT_DELIVERY` events)
-  - `discord/bot/formatters/embeds.py` (Rich Discord embed formatters)
-  - `discord/tests/test_cogs.py`
-- **Dependencies**: Python 3.11+, discord.py, httpx, Pytest.
-- **Security Considerations**: Zero direct DB access in Discord bot. Ephemeral slash command responses (`ephemeral: true`). Results delivered strictly via private DMs. Catches Discord error `50007` when DMs are disabled and flags results for dashboard retrieval.
-- **Tests**: Pytest mock tests for Discord slash command handlers and DM renderer.
-- **Manual Verification**: Type `/scan` in Discord channel $\rightarrow$ receive immediate ephemeral ack ("Task queued..."). Upon scan completion $\rightarrow$ receive private Discord DM with rich visual embed of scan findings.
-- **Acceptance Criteria**: Slash commands functional, ephemeral acks working, DM delivery successful, channel remains clean.
-- **Rollback Considerations**: Disable bot commands or restart bot gateway session.
+  - `backend/src/netra_backend/models/finding.py` (`Finding` and `FindingEvidence` ORM models)
+  - `backend/src/netra_backend/services/finding_engine.py` (Deduplication, ingestion, lifecycle, reopened status transitions)
+  - `backend/src/netra_backend/api/v1/findings.py` (Control-plane REST endpoints: `GET /findings`, `GET /findings/{id}`, `PATCH /findings/{id}`)
+  - `backend/src/netra_backend/security.py` (Optional role claim in JWT access token)
+  - `backend/tests/integration/test_finding_deduplication_concurrency.py` (Concurrency & RLS deduplication tests)
+  - `backend/tests/integration/test_finding_endpoints.py` (REST API integration tests)
+- **Dependencies**: FastAPI, SQLAlchemy 2.0, Pydantic v2, Pytest.
+- **Security Considerations**: PostgreSQL RLS tenant isolation, JWT control-plane role authorization (`ADMIN`, `OPERATOR`, `ANALYST`), SHA-256 fingerprint hashing, 1MB maximum evidence payload size validation.
+- **Tests**: Pytest integration tests verifying 5 concurrent result submissions deduplicate to 1 logical finding master with 5 distinct evidence records, reopened state transition on reappearance, and REST API access controls.
+- **Acceptance Criteria**: 100% test pass rate across 106 tests, zero linter warnings (`ruff check`), zero type errors (`mypy`).
+- **Phase 7 Status**: **COMPLETED**
 
 > [!IMPORTANT]
-> **PHASE 7 GATE**: **DO NOT PROCEED until all Phase 7 verification criteria pass.**
+> **PHASE 7 GATE**: **COMPLETED (106/106 Pytest tests passing, 0 Ruff linter errors, 0 Mypy type errors).**
 
 ---
 
